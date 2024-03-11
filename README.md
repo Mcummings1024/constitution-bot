@@ -1,2 +1,5 @@
-# biblegatewaybot
-Telegram bot hosted on Google App Engine that fetches bible passages from biblegateway.com
+# US Constitution Bot (@usconstitutionbot)
+Telegram bot that fetches US Constitution passages from wikisource.org
+
+## Usage
+// todo

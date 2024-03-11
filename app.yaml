@@ -1,10 +1,10 @@
-runtime: python27
+runtime: python36
 api_version: 1
 threadsafe: yes
 
 handlers:
 - url: /(message|promo|migrate|mass|verify)
-  script: biblegatewaybot.app
+  script: constitutionbot.app
   login: admin
 
 - url: /favicon.ico
@@ -16,7 +16,7 @@ handlers:
   upload: thumb.jpg
 
 - url: .*
-  script: biblegatewaybot.app
+  script: constitutionbot.app
 
 libraries:
 - name: webapp2

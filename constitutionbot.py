@@ -1,22 +1,24 @@
-import webapp2
+import http.server
 import logging
 import json
-import textwrap
-import urllib
 import re
+import textwrap
+
 from bs4 import BeautifulSoup
-from scriptures import extract as extract_refs
-from google.appengine.api import urlfetch, urlfetch_errors, taskqueue
-from google.appengine.ext import db
+from collections import OrderedDict
 from datetime import datetime, timedelta
-from xml.etree import ElementTree as etree
+from urllib.request import urlopen
+from google.appengine.api import urlfetch, urlfetch_errors, taskqueue  # need replacements?
+from google.appengine.ext import db
 
 EMPTY = 'empty'
+
 
 def strip_markdown(string):
     return string.replace('*', '\*').replace('_', '\_').replace('`', '\`').replace('[', '\[')
 
-def get_passage(passage, version='NIV', inline_details=False):
+
+def get_passage(passage, is_amendment=False, inline_details=False):
     def to_sup(text):
         sups = {u'0': u'\u2070',
                 u'1': u'\xb9',
@@ -31,39 +33,44 @@ def get_passage(passage, version='NIV', inline_details=False):
                 u'-': u'\u207b'}
         return ''.join(sups.get(char, char) for char in text)
 
-    BG_URL = 'https://www.biblegateway.com/passage/?search={}&version={}&interface=print'
+    SOURCE_URL = 'https://en.wikisource.org/wiki/Constitution_of_the_United_States_of_America'
+    if is_amendment:
+        SOURCE_URL = 'https://en.wikisource.org/wiki/United_States_Bill_of_Rights'
 
-    search = urllib.quote(passage.lower().strip())
-    url = BG_URL.format(search, version)
     try:
         logging.debug('Began fetching from remote')
-        result = urlfetch.fetch(url, deadline=10)
+        result = urlopen(SOURCE_URL).read().decode('utf8')
         logging.debug('Finished fetching from remote')
     except urlfetch_errors.Error as e:
         logging.warning('Error fetching passage:\n' + str(e))
         return None
 
-    html = result.content
-    start = html.find('<div class="passage-col')
+    html = result
+    start = html.find('<div class="prp-pages-output')
     if start == -1:
         return EMPTY
-    end = html.find('<!-- passage-box -->', start)
-    passage_html = html[start:end]
+    end = html.find('<table>', start)  # not sure if consistent/good
+    passage_html = html[start:end - 1]
 
     soup = BeautifulSoup(passage_html, 'lxml')
 
-    title = soup.select_one('.bcv').text
-    header = '*' + strip_markdown(title.strip()) + '* (' + version + ')'
+    # format of html element ids: aIV[-s#][-c#]
+    passage_id = 'a' + arabic_to_roman(int(passage[0]))
 
-    passage_soup = soup.select_one('.passage-text')
+    title = 'Article ' + passage_id[1:]
+    header = '*' + strip_markdown(title.strip()) + '*'
+
+    # need every dd.p in dl after article start
+    for tag in soup.select('[id=' + passage_id + '], [id^=' + passage_id + ']'):
+        print(tag.text)
 
     WANTED = 'bg-bot-passage-text'
-    UNWANTED = '.passage-other-trans, .footnote, .footnotes, .crossreference, .crossrefs'
+    # UNWANTED = '.passage-other-trans, .footnote, .footnotes, .crossreference, .cross-refs'
 
-    for tag in passage_soup.select(UNWANTED):
-        tag.decompose()
+    # for tag in soup.select(UNWANTED):
+    #     tag.decompose()
 
-    for tag in passage_soup.select('h1, h2, h3, h4, h5, h6'):
+    for tag in soup.select('h1, h2, h3, h4, h5, h6'):
         tag['class'] = WANTED
         text = tag.text.strip()
         if not inline_details:
@@ -72,34 +79,26 @@ def get_passage(passage, version='NIV', inline_details=False):
 
     needed_stripping = False
 
-    for tag in passage_soup.select('p'):
+    for tag in soup.select('p'):
         tag['class'] = WANTED
         bad_strings = tag(text=re.compile('(\*|\_|\`|\[)'))
         for bad_string in bad_strings:
-            stripped_text = strip_markdown(unicode(bad_string))
+            stripped_text = strip_markdown(bad_string)
             bad_string.replace_with(stripped_text)
             needed_stripping = True
 
     if needed_stripping:
         logging.info('Stripped markdown')
 
-    for tag in passage_soup.select('br'):
+    for tag in soup.select('br'):
         tag.name = 'span'
         tag.string = '\n'
 
-    for tag in passage_soup.select('.chapternum'):
-        num = tag.text.strip()
-        tag.string = '*' + strip_markdown(num) + '* '
-
-    for tag in passage_soup.select('.versenum'):
-        num = tag.text.strip()
-        tag.string = to_sup(num)
-
-    for tag in passage_soup.select('.text'):
+    for tag in soup.select('.text'):
         tag.string = tag.text.rstrip()
 
     final_text = header + '\n\n'
-    for tag in passage_soup(class_=WANTED):
+    for tag in soup(class_=WANTED):
         final_text += tag.text.strip() + '\n\n'
 
     logging.debug('Finished BeautifulSoup processing')
@@ -110,151 +109,102 @@ def get_passage(passage, version='NIV', inline_details=False):
         start = html.find('data-osis="') + 11
         end = html.find('"', start)
         data_osis = html[start:end]
-        qr_id = data_osis + '/' + version
-        qr_title = title.strip() + ' (' + version + ')'
+        qr_id = data_osis + '/'
+        qr_title = title.strip()
         content = final_text.split('\n', 1)[1].replace('*', '').replace('_', '')
         content = ' '.join(content.split())
         qr_description = (content[:150] + '...') if len(content) > 153 else content
-        return (final_text.strip(), qr_id, qr_title, qr_description)
+        return final_text.strip(), qr_id, qr_title, qr_description
 
-MAX_SEARCH_RESULTS = 5
 
-def get_search_results_old(text, start=0):
-    BH_URL = 'http://216.58.158.10/search?q={}&output=xml_no_dtd&client=default_frontend&num=' + \
-             str(MAX_SEARCH_RESULTS) + '&oe=UTF-8&ie=UTF-8&site=biblecc&filter=0&start={}'
+def arabic_to_roman(numeral):
+    roman = OrderedDict()
+    roman[5] = "V"
+    roman[4] = "IV"
+    roman[1] = "I"
 
-    query = urllib.quote(text.lower().strip())
-    url = BH_URL.format(query, start)
-    try:
-        result = urlfetch.fetch(url, deadline=10)
-    except urlfetch_errors.Error as e:
-        logging.warning('Error fetching search results:\n' + str(e))
-        return None
+    def roman_num(num):
+        for r in roman.keys():
+            x, y = divmod(num, r)
+            yield roman[r] * x
+            num -= (r * x)
+            if num <= 0:
+                break
 
-    xml = result.content
-    tree = etree.fromstring(xml)
+    return "".join([a for a in roman_num(numeral)])
 
-    results_body = ''
-    for result in tree.iterfind('RES/R'):
-        header = result.find('T').text
-        content = result.find('S').text
 
-        header = BeautifulSoup(header, 'lxml').text
-        idx = header.find(':')
-        idx += header[idx:].find(' ')
-        title = strip_markdown(header[:idx].strip())
+print('test get_passage(3:2)')
+get_passage('3:2')
 
-        soup = BeautifulSoup(content, 'lxml')
+# MAX_SEARCH_RESULTS = 5
 
-        bad_strings = soup(text=re.compile('(\*|\_)'))
-        for bad_string in bad_strings:
-            stripped_text = strip_markdown(unicode(bad_string))
-            bad_string.replace_with(stripped_text)
+# def get_search_results(text, start=0):
+#     BH_URL = 'http://biblehub.net/search.php?q={}'
 
-        for tag in soup('b'):
-            if tag.text == u'...':
-                continue
-            tag.string = '*' + tag.text + '*'
+#     query = urllib.quote(text.encode('utf-8', 'ignore').lower().strip())
+#     url = BH_URL.format(query)
+#     try:
+#         result = urlfetch.fetch(url, deadline=10)
+#     except urlfetch_errors.Error as e:
+#         logging.warning('Error fetching search results:\n' + str(e))
+#         return None
 
-        description = soup.text.strip()
+#     html = result.content
+#     soup = BeautifulSoup(html, 'lxml')
 
-        link = '/' + ''.join(title.split()).lower().replace(':', 'V')
+#     headers = soup.select('.l')
+#     bodies = soup.select('.s')
 
-        results_body += u'\U0001F539' + title + '\n' + description + '\n' + link + '\n\n'
+#     num_results = len(headers)
 
-    if not results_body:
-        return EMPTY
+#     if num_results == 0 or start >= num_results:
+#         return EMPTY
 
-    final_text = 'Search results'
+#     results_body = ''
+#     end = min(num_results, start + MAX_SEARCH_RESULTS)
+#     for i in range(start, end):
+#         header = headers[i].text
 
-    res = tree.find('RES')
-    sn = res.get('SN')
-    en = res.get('EN')
-    total = res.find('M').text
+#         idx = header.find(':')
+#         idx += header[idx:].find(' ')
+#         title = strip_markdown(header[:idx].strip())
 
-    if start != int(sn) - 1:
-        return EMPTY
+#         body = bodies[i]
 
-    if int(total) > MAX_SEARCH_RESULTS:
-        final_text += ' ({}-{} of {})'.format(sn, en, total)
+#         bad_strings = body(text=re.compile('(\*|\_)'))
+#         for bad_string in bad_strings:
+#             stripped_text = strip_markdown(unicode(bad_string))
+#             bad_string.replace_with(stripped_text)
 
-    final_text += '\n\n' + results_body.strip()
+#         for tag in body('b'):
+#             if tag.text == u'...':
+#                 continue
+#             tag.string = '*' + tag.text + '*'
 
-    if int(en) < int(total):
-        final_text += '\n\nGet /more results'
+#         body_text = body.text
+#         idx = body_text.rfind('//biblehub.com')
+#         description = ' '.join(body_text[:idx].split())
 
-    return final_text
+#         link = '/' + ''.join(title.split()).lower().replace(':', 'V')
 
-def get_search_results(text, start=0):
-    BH_URL = 'http://biblehub.net/search.php?q={}'
+#         results_body += u'\U0001F539' + title + '\n' + description + '\n' + link + '\n\n'
 
-    query = urllib.quote(text.encode('utf-8', 'ignore').lower().strip())
-    url = BH_URL.format(query)
-    try:
-        result = urlfetch.fetch(url, deadline=10)
-    except urlfetch_errors.Error as e:
-        logging.warning('Error fetching search results:\n' + str(e))
-        return None
+#     final_text = 'Search results'
 
-    html = result.content
-    soup = BeautifulSoup(html, 'lxml')
+#     if num_results > MAX_SEARCH_RESULTS:
+#         final_text += ' ({}-{} of {})'.format(start + 1, end, num_results)
 
-    headers = soup.select('.l')
-    bodies = soup.select('.s')
+#     final_text += '\n\n' + results_body.strip()
 
-    num_results = len(headers)
+#     if start + MAX_SEARCH_RESULTS < num_results:
+#         final_text += '\n\nGet /more results'
 
-    if num_results == 0 or start >= num_results:
-        return EMPTY
+#     return final_text
 
-    results_body = ''
-    end = min(num_results, start + MAX_SEARCH_RESULTS)
-    for i in range(start, end):
-        header = headers[i].text
-
-        idx = header.find(':')
-        idx += header[idx:].find(' ')
-        title = strip_markdown(header[:idx].strip())
-
-        body = bodies[i]
-
-        bad_strings = body(text=re.compile('(\*|\_)'))
-        for bad_string in bad_strings:
-            stripped_text = strip_markdown(unicode(bad_string))
-            bad_string.replace_with(stripped_text)
-
-        for tag in body('b'):
-            if tag.text == u'...':
-                continue
-            tag.string = '*' + tag.text + '*'
-
-        body_text = body.text
-        idx = body_text.rfind('//biblehub.com')
-        description = ' '.join(body_text[:idx].split())
-
-        link = '/' + ''.join(title.split()).lower().replace(':', 'V')
-
-        results_body += u'\U0001F539' + title + '\n' + description + '\n' + link + '\n\n'
-
-    final_text = 'Search results'
-
-    if num_results > MAX_SEARCH_RESULTS:
-        final_text += ' ({}-{} of {})'.format(start + 1, end, num_results)
-
-    final_text += '\n\n' + results_body.strip()
-
-    if start + MAX_SEARCH_RESULTS < num_results:
-        final_text += '\n\nGet /more results'
-
-    return final_text
-
-def other_version(current_version):
-    if current_version == 'NASB':
-        return 'NIV'
-    return 'NASB'
 
 from secrets import TOKEN, ADMIN_ID, BOT_ID, BOTFAMILY_HASH
-from versions import VERSION_DATA, VERSION_LOOKUP, VERSIONS, BOOKS
+
 TELEGRAM_URL = 'https://api.telegram.org/bot' + TOKEN
 TELEGRAM_URL_SEND = TELEGRAM_URL + '/sendMessage'
 TELEGRAM_URL_CHAT_ACTION = TELEGRAM_URL + '/sendChatAction'
@@ -301,14 +251,17 @@ RECOGNISED_ERRORS = ('PEER_ID_INVALID',
                      'Bad Request: group chat was deactivated',
                      RECOGNISED_ERROR_MIGRATE)
 
+
 def telegram_post(data, deadline=10):
     return urlfetch.fetch(url=TELEGRAM_URL_SEND, payload=data, method=urlfetch.POST,
                           headers=JSON_HEADER, deadline=deadline)
+
 
 def telegram_query(uid, deadline=10):
     data = json.dumps({'chat_id': uid, 'action': 'typing'})
     return urlfetch.fetch(url=TELEGRAM_URL_CHAT_ACTION, payload=data, method=urlfetch.POST,
                           headers=JSON_HEADER, deadline=deadline)
+
 
 class User(db.Model):
     username = db.StringProperty(indexed=False)
@@ -317,7 +270,6 @@ class User(db.Model):
     created = db.DateTimeProperty(auto_now_add=True)
     last_received = db.DateTimeProperty(auto_now_add=True, indexed=False)
     last_sent = db.DateTimeProperty(indexed=False)
-    version = db.StringProperty(indexed=False, default='NIV')
     reply_to = db.StringProperty(multiline=True, indexed=False)
     promo = db.BooleanProperty(default=False)
 
@@ -355,10 +307,6 @@ class User(db.Model):
         self.last_sent = datetime.now()
         self.put()
 
-    def update_version(self, version):
-        self.version = version
-        self.put()
-
     def await_reply(self, command):
         if command and len(command) > 1500:
             command = command[:1500]
@@ -373,6 +321,7 @@ class User(db.Model):
         self.delete()
         return new_user
 
+
 def get_user(uid):
     key = db.Key.from_path('User', str(uid))
     user = db.get(key)
@@ -381,10 +330,12 @@ def get_user(uid):
         user.put()
     return user
 
+
 def user_exists(uid):
     key = db.Key.from_path('User', str(uid))
     user = db.get(key)
     return user != None
+
 
 def update_profile(uid, uname, fname, lname):
     existing_user = get_user(uid)
@@ -393,12 +344,13 @@ def update_profile(uid, uname, fname, lname):
         existing_user.first_name = fname
         existing_user.last_name = lname
         existing_user.update_last_received()
-        #existing_user.put()
+        # existing_user.put()
         return existing_user
     else:
         user = User(key_name=str(uid), username=uname, first_name=fname, last_name=lname)
         user.put()
         return user
+
 
 def build_buttons(menu):
     buttons = []
@@ -406,12 +358,15 @@ def build_buttons(menu):
         buttons.append([item])
     return buttons
 
+
 def build_keyboard(buttons):
     return {'keyboard': buttons, 'one_time_keyboard': True}
+
 
 def build_inline_switch_keyboard(text, query=''):
     inline_switch_button = {'text': text, 'switch_inline_query': query}
     return {'inline_keyboard': [[inline_switch_button]]}
+
 
 def send_message(user_or_uid, text, msg_type='message', force_reply=False, markdown=False,
                  disable_web_page_preview=True, custom_keyboard=None, hide_keyboard=False):
@@ -449,10 +404,8 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, markd
             taskqueue.add(url='/message', payload=payload, countdown=countdown)
             logging.info(LOG_ENQUEUED.format(msg_type, uid, user.get_description()))
 
-        if msg_type in ('promo', 'mass'):
-            if msg_type == 'promo':
-                user.set_promo(True)
-
+        if msg_type == 'promo':
+            user.set_promo(True)
             queue_message()
             return
 
@@ -486,6 +439,7 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, markd
             i += 1
     else:
         send_short_message(text)
+
 
 def handle_response(response, user, uid, msg_type):
     if response.get('ok') == True:
@@ -523,6 +477,7 @@ def handle_response(response, user, uid, msg_type):
 
     return True
 
+
 def send_typing(uid):
     data = json.dumps({'chat_id': uid, 'action': 'typing'})
     try:
@@ -532,17 +487,15 @@ def send_typing(uid):
     except urlfetch_errors.Error:
         return
 
-class MainPage(webapp2.RequestHandler):
-    BOT_USERNAME = 'biblegatewaybot'
-    BOT_HANDLE = '@' + BOT_USERNAME
-    BOT_DESCRIPTION = 'This bot can fetch bible passages from biblegateway.com.'
 
-    CMD_LIST = '/get <reference>\n/get<version> <reference>\n' + \
-               '/search <keyword>\n/setdefault <version>\n\n' + \
-               'Examples:\n/get John 3:16\n/getNLT 1 cor 13:4-7\n' + \
-               '/search the greatest commandment\n/setdefault NASB\n\n' + \
-               'Inline mode:\n' + BOT_HANDLE + ' john 3:16\n' + \
-               BOT_HANDLE + ' 1co13 nasb'
+class MainPage(http.server.BaseHTTPRequestHandler):
+    BOT_USERNAME = 'usconstitutionbot'
+    BOT_HANDLE = '@' + BOT_USERNAME
+    BOT_DESCRIPTION = 'This bot can fetch US Constitution passages from wikisource.org.'
+
+    CMD_LIST = '/get <article>[:<section>]\n/getAmd <number>\n' + \
+               'Examples:\n/get 3:2\n/getAmd 1\n' + \
+               'Inline mode:\n' + BOT_HANDLE + ' 3:2\n' + BOT_HANDLE + ' amd1'
 
     WELCOME_GROUP = 'Hello, friends in {}! Thanks for adding me in!'
     WELCOME_USER = 'Hello, {}! Welcome!'
@@ -550,7 +503,7 @@ class MainPage(webapp2.RequestHandler):
                           '\n\nTo get started, enter one of the following commands:\n' + CMD_LIST
 
     HELP = 'Hi {}! Please enter one of the following commands:\n' + CMD_LIST + '\n\n' + \
-           'Enjoy using BibleGateway Bot? Click the link below to rate it!\n' + \
+           'Enjoy using Constitution Bot? Click the link below to rate it!\n' + \
            'https://telegram.me/storebot?start=' + BOT_USERNAME
 
     UNRECOGNISED = 'Sorry {}, I couldn\'t understand that. ' + \
@@ -559,27 +512,26 @@ class MainPage(webapp2.RequestHandler):
     REMOTE_ERROR = 'Sorry {}, I\'m having some difficulty accessing the site. ' + \
                    'Please try again later.'
 
-    GET_PASSAGE = 'Which bible passage do you want to lookup? Version: {}\n\n' + \
-                  'Tip: For faster results, use:\n/get John 3:16\n/get{} John 3:16'
+    GET_PASSAGE = 'Which constitution passage do you want to lookup?'
 
-    GET_SEARCH_TERM = 'Please enter what you wish to search for.\n\n' + \
-                      'Tip: For faster results, use:\n/search make disciples\n' + \
-                      '/search "love is patient" _(quotes to match exact phrase)_'
+    # GET_SEARCH_TERM = 'Please enter what you wish to search for.\n\n' + \
+    #                   'Tip: For faster results, use:\n/search make disciples\n' + \
+    #                   '/search "love is patient" _(quotes to match exact phrase)_'
 
     NO_RESULTS_FOUND = 'Sorry {}, no results were found. Please try again.'
-    VERSION_NOT_FOUND = 'Sorry {}, I couldn\'t find that version. ' + \
-                        'Use /setdefault to view all available versions.'
+    # VERSION_NOT_FOUND = 'Sorry {}, I couldn\'t find that version. ' + \
+    #                     'Use /setdefault to view all available versions.'
 
     SET_DEFAULT_CHOOSE_LANGUAGE = 'Choose a language:'
-    SET_DEFAULT_CHOOSE_VERSION = 'Select a version:'
-    SET_DEFAULT_SUCCESS = 'Success! Default version is now *{}*.'
-    SET_DEFAULT_FAILURE = VERSION_NOT_FOUND + '\n\nCurrent default is *{}*.'
+    # SET_DEFAULT_CHOOSE_VERSION = 'Select a version:'
+    # SET_DEFAULT_SUCCESS = 'Success! Default version is now *{}*.'
+    # SET_DEFAULT_FAILURE = VERSION_NOT_FOUND + '\n\nCurrent default is *{}*.'
 
-    SETTINGS = 'Current default version is *{}*. Use /setdefault to change it.'
+    # SETTINGS = 'Current default version is *{}*. Use /setdefault to change it.'
 
     BACK_TO_LANGUAGES = u'\U0001F519' + ' to language list'
 
-    TRY_KEYBOARD = build_inline_switch_keyboard('Try inline mode', 'john 3:16 nlt')
+    TRY_KEYBOARD = build_inline_switch_keyboard('Try inline mode', '3:2')
 
     def get(self):
         self.response.headers['Content-Type'] = 'text/plain'
@@ -606,15 +558,11 @@ class MainPage(webapp2.RequestHandler):
                 results = []
             else:
                 words = query.split()
-                if len(words) > 1 and words[-1].upper() in VERSIONS:
-                    passage = ' '.join(words[:-1])
-                    version = words[-1].upper()
-                    response = get_passage(passage, version=version, inline_details=True)
+                if len(words) > 1 and words[0].upper() == 'AMD':
+                    passage = words[1]
+                    response = get_passage(passage, is_amendment=True, inline_details=True)
                 else:
-                    if user:
-                        response = get_passage(query, version=user.version, inline_details=True)
-                    else:
-                        response = get_passage(query, inline_details=True)
+                    response = get_passage(query, inline_details=True)
 
                 if not response:
                     self.abort(502)
@@ -629,9 +577,9 @@ class MainPage(webapp2.RequestHandler):
                                'disable_web_page_preview': True}
                     results = [{'type': 'article', 'id': qr_id, 'title': qr_title,
                                 'description': qr_description, 'input_message_content': content,
-                                'thumb_url': 'https://biblegatewaybot.appspot.com/thumb.jpg'}]
+                                'thumb_url': ''}]
 
-            default_version = user.version if user else 'NIV'
+            default_version = 'NIV'  # todo: remove
             payload = {'method': 'answerInlineQuery', 'inline_query_id': qid, 'results': results,
                        'switch_pm_text': 'Default version: ' + default_version,
                        'switch_pm_parameter': 'setdefault', 'cache_time': 0}
@@ -688,14 +636,14 @@ class MainPage(webapp2.RequestHandler):
                 name_string += ' @' + username.encode('utf-8', 'ignore').strip()
             return name_string
 
-        if user.last_sent == None or text == '/start':
+        if user.last_sent is None or text == '/start':
             if user.is_group() and msg.get('new_chat_members'):
                 new_chat_member_ids = [str(m.get('id')) for m in msg.get('new_chat_members')]
                 if BOT_ID not in new_chat_member_ids:
                     logging.info(LOG_TYPE_NEW_PARTICIPANT)
                     return
 
-            if user.last_sent == None:
+            if user.last_sent is None:
                 logging.info(LOG_TYPE_START_NEW)
                 new_user = True
             else:
@@ -710,25 +658,16 @@ class MainPage(webapp2.RequestHandler):
             send_message(user, response, msg_type='welcome', custom_keyboard=self.TRY_KEYBOARD)
             user.await_reply(None)
 
-            if text == '/start setdefault':
-                user.await_reply('setdefault')
-                buttons = build_buttons(VERSION_DATA.keys())
-                keyboard = build_keyboard(buttons)
-                send_message(user, self.SET_DEFAULT_CHOOSE_LANGUAGE, custom_keyboard=keyboard)
-
             if new_user:
                 if user.is_group():
                     new_alert = 'New group: "{}" via user: {}'.format(group_name, get_from_string())
                 else:
-                    if text == '/start setdefault':
-                        new_alert = 'New user via inline: ' + get_from_string()
-                    else:
-                        new_alert = 'New user: ' + get_from_string()
+                    new_alert = 'New user: ' + get_from_string()
                 send_message(ADMIN_ID, new_alert)
 
             return
 
-        if text == None:
+        if text is None:
             logging.info(LOG_TYPE_NON_TEXT)
             migrate_to_chat_id = msg.get('migrate_to_chat_id')
             if migrate_to_chat_id:
@@ -741,14 +680,14 @@ class MainPage(webapp2.RequestHandler):
         def is_get_command():
             return text.lower().startswith('/get')
 
-        def is_full_set_default_command():
-            return text.lower().startswith('/setdefault ')
+        # def is_full_set_default_command():
+        #     return text.lower().startswith('/setdefault ')
 
-        def is_full_search_command():
-            return text.lower().startswith('/search ')
+        # def is_full_search_command():
+        #     return text.lower().startswith('/search ')
 
-        def is_link_command():
-            return text[1:].startswith(BOOKS)
+        # def is_link_command():
+        #     return text[1:].startswith(BOOKS)
 
         def is_command(word):
             cmd = text.lower().strip()
@@ -760,40 +699,32 @@ class MainPage(webapp2.RequestHandler):
 
         if is_command('get'):
             user.await_reply('get')
-            version = user.version
-            send_message(user, self.GET_PASSAGE.format(version, other_version(version)),
-                         force_reply=True)
+            is_amendment = user.version
+            send_message(user, self.GET_PASSAGE, force_reply=True)
 
-        elif is_command('search'):
-            user.await_reply('search')
-            send_message(user, self.GET_SEARCH_TERM, force_reply=True, markdown=True)
+        # elif is_command('search'):
+        #     user.await_reply('search')
+        #     send_message(user, self.GET_SEARCH_TERM, force_reply=True, markdown=True)
 
         elif is_get_command():
             user.await_reply(None)
             words = text.split()
             first_word = words[0]
 
-            version = first_word[4:].upper()
-            if not version:
-                version = user.version
-            if version not in VERSIONS:
-                send_message(user, self.VERSION_NOT_FOUND.format(name))
-                return
-
             passage = text[len(first_word) + 1:].strip()
             if not passage:
                 user.await_reply(first_word[1:])
-                send_message(user, self.GET_PASSAGE.format(version, other_version(version)),
-                             force_reply=True)
+                send_message(user, self.GET_PASSAGE, force_reply=True)
                 return
+
             first_passage_word = passage.split()[0].upper()
-            if len(first_word) == 4 and first_passage_word in VERSIONS and \
-               passage[len(first_passage_word) + 1:].strip():
-                version = first_passage_word
+
+            if len(first_word) == 4 and passage[len(first_passage_word) + 1:].strip():
+                is_amendment = first_passage_word == 'AMD'
                 passage = passage[len(first_passage_word) + 1:]
 
             send_typing(uid)
-            response = get_passage(passage, version)
+            response = get_passage(passage, is_amendment)
 
             if response == EMPTY:
                 send_message(user, self.NO_RESULTS_FOUND.format(name))
@@ -804,59 +735,59 @@ class MainPage(webapp2.RequestHandler):
 
             send_message(user, response, msg_type='passage')
 
-        elif is_full_set_default_command():
-            user.await_reply(None)
-            version = text[12:].strip().upper()
+        # elif is_full_set_default_command():
+        #     user.await_reply(None)
+        #     version = text[12:].strip().upper()
 
-            if version not in VERSIONS:
-                send_message(user, self.SET_DEFAULT_FAILURE.format(name, user.version),
-                             markdown=True)
-                return
+        #     if version not in VERSIONS:
+        #         send_message(user, self.SET_DEFAULT_FAILURE.format(name, user.version),
+        #                      markdown=True)
+        #         return
 
-            user.update_version(version)
-            send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True)
+        #     user.update_version(version)
+        #     send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True)
 
-        elif is_full_search_command():
-            search_term = raw_text[8:].strip().lower()
-            user.await_reply('search0 ' + raw_text[8:].strip().lower())
+        # elif is_full_search_command():
+        #     search_term = raw_text[8:].strip().lower()
+        #     user.await_reply('search0 ' + raw_text[8:].strip().lower())
 
-            send_typing(uid)
-            response = get_search_results(search_term)
+        #     send_typing(uid)
+        #     response = get_search_results(search_term)
 
-            if response == EMPTY:
-                user.await_reply(None)
-                send_message(user, self.NO_RESULTS_FOUND.format(name))
-                return
-            elif response == None:
-                send_message(user, self.REMOTE_ERROR.format(name))
-                return
+        #     if response == EMPTY:
+        #         user.await_reply(None)
+        #         send_message(user, self.NO_RESULTS_FOUND.format(name))
+        #         return
+        #     elif response == None:
+        #         send_message(user, self.REMOTE_ERROR.format(name))
+        #         return
 
-            send_message(user, response, msg_type='result')
+        #     send_message(user, response, msg_type='result')
 
-        elif is_command('setdefault') or raw_text == self.BACK_TO_LANGUAGES or \
-             text == '/start setdefault':
-            if text == '/start setdefault':
-                user.await_reply('setdefault')
-            buttons = build_buttons(VERSION_DATA.keys())
-            keyboard = build_keyboard(buttons)
-            send_message(user, self.SET_DEFAULT_CHOOSE_LANGUAGE, custom_keyboard=keyboard)
+        # elif is_command('setdefault') or raw_text == self.BACK_TO_LANGUAGES or \
+        #      text == '/start setdefault':
+        #     if text == '/start setdefault':
+        #         user.await_reply('setdefault')
+        #     buttons = build_buttons(VERSION_DATA.keys())
+        #     keyboard = build_keyboard(buttons)
+        #     send_message(user, self.SET_DEFAULT_CHOOSE_LANGUAGE, custom_keyboard=keyboard)
 
-        elif raw_text in VERSION_DATA:
-            buttons = build_buttons(VERSION_DATA[raw_text] + [self.BACK_TO_LANGUAGES])
-            keyboard = build_keyboard(buttons)
-            send_message(user, self.SET_DEFAULT_CHOOSE_VERSION, custom_keyboard=keyboard)
+        # elif raw_text in VERSION_DATA:
+        #     buttons = build_buttons(VERSION_DATA[raw_text] + [self.BACK_TO_LANGUAGES])
+        #     keyboard = build_keyboard(buttons)
+        #     send_message(user, self.SET_DEFAULT_CHOOSE_VERSION, custom_keyboard=keyboard)
 
-        elif raw_text in VERSION_LOOKUP:
-            version = VERSION_LOOKUP[raw_text]
-            user.update_version(version)
-            if user.reply_to == 'setdefault':
-                inline_keyboard = build_inline_switch_keyboard('Back to chat')
-                send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True,
-                             custom_keyboard=inline_keyboard)
-            else:
-                send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True,
-                             hide_keyboard=True)
-            user.await_reply(None)
+        # elif raw_text in VERSION_LOOKUP:
+        #     version = VERSION_LOOKUP[raw_text]
+        #     user.update_version(version)
+        #     if user.reply_to == 'setdefault':
+        #         inline_keyboard = build_inline_switch_keyboard('Back to chat')
+        #         send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True,
+        #                      custom_keyboard=inline_keyboard)
+        #     else:
+        #         send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True,
+        #                      hide_keyboard=True)
+        #     user.await_reply(None)
 
         elif is_command('help'):
             user.await_reply(None)
@@ -866,78 +797,76 @@ class MainPage(webapp2.RequestHandler):
             user.await_reply(None)
             send_message(user, self.SETTINGS.format(user.version), markdown=True)
 
-        elif is_link_command():
+        # elif is_link_command():
+        #     user.await_reply(None)
+        #     passage = text[1:].replace('V', ':')
+        #     if passage.endswith(self.BOT_HANDLE):
+        #         passage = passage[:-len(self.BOT_HANDLE)]
+
+        #     send_typing(uid)
+        #     response = get_passage(passage, user.version)
+
+        #     if response == EMPTY:
+        #         send_message(user, self.NO_RESULTS_FOUND.format(name))
+        #         logging.info(LOG_ERROR_INVALID_LINK + text)
+        #         return
+        #     elif response == None:
+        #         send_message(user, self.REMOTE_ERROR.format(name))
+        #         return
+
+        #     send_message(user, response, msg_type='passage')
+
+        # elif text in ('/more', '/more' + self.BOT_HANDLE) and user.reply_to != None and \
+        #      user.reply_to.startswith('search') and len(user.reply_to) > 6:
+        #     idx = user.reply_to.find(' ')
+        #     old_start = int(user.reply_to[6:idx])
+        #     search_term = user.reply_to[idx + 1:]
+
+        #     new_start = old_start + MAX_SEARCH_RESULTS
+
+        #     user.await_reply('search{} '.format(new_start) + search_term)
+
+        #     send_typing(uid)
+        #     response = get_search_results(search_term, new_start)
+
+        #     if response == EMPTY:
+        #         user.await_reply(None)
+        #         send_message(user, self.NO_RESULTS_FOUND.format(name))
+        #         return
+        #     elif response == None:
+        #         send_message(user, self.REMOTE_ERROR.format(name))
+        #         return
+
+        #     send_message(user, response, msg_type='result')
+
+        # elif user.reply_to != None and user.reply_to == 'search':
+        #     search_term = text
+        #     user.await_reply('search0 ' + raw_text)
+
+        #     send_typing(uid)
+        #     response = get_search_results(search_term)
+
+        #     if response == EMPTY:
+        #         user.await_reply(None)
+        #         send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
+        #         return
+        #     elif response == None:
+        #         send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
+        #         return
+
+        #     send_message(user, response, msg_type='result', hide_keyboard=True)
+
+        elif user.reply_to is not None and user.reply_to.startswith('get'):
+            is_amendment = user.reply_to[3:].upper() == 'AMD'
             user.await_reply(None)
-            passage = text[1:].replace('V', ':')
-            if passage.endswith(self.BOT_HANDLE):
-                passage = passage[:-len(self.BOT_HANDLE)]
 
             send_typing(uid)
-            response = get_passage(passage, user.version)
+            response = get_passage(text, is_amendment)
 
             if response == EMPTY:
-                send_message(user, self.NO_RESULTS_FOUND.format(name))
-                logging.info(LOG_ERROR_INVALID_LINK + text)
-                return
-            elif response == None:
-                send_message(user, self.REMOTE_ERROR.format(name))
-                return
-
-            send_message(user, response, msg_type='passage')
-
-        elif text in ('/more', '/more' + self.BOT_HANDLE) and user.reply_to != None and \
-             user.reply_to.startswith('search') and len(user.reply_to) > 6:
-            idx = user.reply_to.find(' ')
-            old_start = int(user.reply_to[6:idx])
-            search_term = user.reply_to[idx + 1:]
-
-            new_start = old_start + MAX_SEARCH_RESULTS
-
-            user.await_reply('search{} '.format(new_start) + search_term)
-
-            send_typing(uid)
-            response = get_search_results(search_term, new_start)
-
-            if response == EMPTY:
-                user.await_reply(None)
-                send_message(user, self.NO_RESULTS_FOUND.format(name))
-                return
-            elif response == None:
-                send_message(user, self.REMOTE_ERROR.format(name))
-                return
-
-            send_message(user, response, msg_type='result')
-
-        elif user.reply_to != None and user.reply_to == 'search':
-            search_term = text
-            user.await_reply('search0 ' + raw_text)
-
-            send_typing(uid)
-            response = get_search_results(search_term)
-
-            if response == EMPTY:
-                user.await_reply(None)
                 send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
                 return
-            elif response == None:
-                send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
-                return
-
-            send_message(user, response, msg_type='result', hide_keyboard=True)
-
-        elif user.reply_to != None and user.reply_to.startswith('get'):
-            version = user.reply_to[3:].upper()
-            user.await_reply(None)
-            if not version:
-                version = user.version
-
-            send_typing(uid)
-            response = get_passage(text, version)
-
-            if response == EMPTY:
-                send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
-                return
-            elif response == None:
+            elif response is None:
                 send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
                 return
 
@@ -947,34 +876,32 @@ class MainPage(webapp2.RequestHandler):
             user.await_reply(None)
             msg_reply = msg.get('reply_to_message')
             if user.is_group() and self.BOT_HANDLE not in text and \
-               not (msg_reply and str(msg_reply.get('from').get('id')) == BOT_ID):
+                    not (msg_reply and str(msg_reply.get('from').get('id')) == BOT_ID):
                 logging.info(LOG_UNRECOGNISED)
                 return
 
-            to_lookup = text.lower().replace(self.BOT_HANDLE, '')
-            to_lookup = to_lookup.replace('revelations', 'revelation')
-            refs = extract_refs(to_lookup)
-            if refs:
-                ref = refs[0]
-                book = ref[0]
-                if book == 'Revelation of Jesus Christ':
-                    book = 'Revelation'
-                passage = '{} {}:{}-{}:{}'.format(book, ref[1], ref[2], ref[3], ref[4])
+            # to_lookup = text.lower().replace(self.BOT_HANDLE, '')
+            # refs = extract_refs(to_lookup)
+            # if refs:
+            #     ref = refs[0]
+            #     book = ref[0]
+            #     passage = '{}:{}-{}:{}'.format(book, ref[1], ref[2], ref[3], ref[4])
 
-                send_typing(uid)
-                response = get_passage(passage, user.version)
+            #     send_typing(uid)
+            #     response = get_passage(passage)
 
-                if response == EMPTY:
-                    logging.error(LOG_ERROR_INVALID_QUICK + text)
+            #     if response == EMPTY:
+            #         logging.error(LOG_ERROR_INVALID_QUICK + text)
 
-                if response and response != EMPTY:
-                    send_message(user, response, msg_type='passage', hide_keyboard=True)
-                    return
+            #     if response and response != EMPTY:
+            #         send_message(user, response, msg_type='passage', hide_keyboard=True)
+            #         return
 
             logging.info(LOG_UNRECOGNISED)
             send_message(user, self.UNRECOGNISED.format(name), custom_keyboard=self.TRY_KEYBOARD)
 
-class MessagePage(webapp2.RequestHandler):
+
+class MessagePage(http.server.BaseHTTPRequestHandler):
     def post(self):
         params = json.loads(self.request.body)
         msg_type = params.get('msg_type')
@@ -995,16 +922,20 @@ class MessagePage(webapp2.RequestHandler):
             logging.debug(data)
             self.abort(502)
 
-class MigratePage(webapp2.RequestHandler):
+
+class MigratePage(http.server.BaseHTTPRequestHandler):
     def get(self):
         self.response.headers['Content-Type'] = 'text/plain'
         self.response.write('Migrate page\n')
 
-class PromoPage(webapp2.RequestHandler):
-    def get(self):
+
+class PromoPage(http.server.BaseHTTPRequestHandler):
+    @staticmethod
+    def get():
         taskqueue.add(url='/promo')
 
-    def post(self):
+    @staticmethod
+    def post():
         three_days_ago = datetime.now() - timedelta(days=3)
         query = User.all()
         query.filter('promo =', False)
@@ -1013,28 +944,15 @@ class PromoPage(webapp2.RequestHandler):
             name = user.first_name.encode('utf-8', 'ignore').strip()
             if user.is_group():
                 promo_msg = 'Hello, friends in {}! '.format(name) + \
-                'Do you find BibleGateway Bot useful?'
+                            'Do you find Constitution Bot useful?'
             else:
-                promo_msg = 'Hi {}, do you find BibleGateway Bot useful?'.format(name)
+                promo_msg = 'Hi {}, do you find Constitution Bot useful?'.format(name)
             promo_msg += ' Why not rate it on the bot store (you don\'t have to exit' + \
-                         ' Telegram)!\nhttps://telegram.me/storebot?start=biblegatewaybot'
+                         ' Telegram)!\nhttps://telegram.me/storebot?start=usconstitutionbot'
             send_message(user, promo_msg, msg_type='promo')
 
-class MassPage(webapp2.RequestHandler):
-    def get(self):
-        taskqueue.add(url='/mass')
 
-    def post(self):
-        # try:
-        #     query = User.all()
-        #     for user in query.run(batch_size=3000):
-        #         mass_msg = '*Update*\n\nUPDATE_TEXT\n\n- BibleGateway Bot admin'
-        #         send_message(user, mass_msg, msg_type='mass', markdown=True)
-        # except Exception as e:
-        #     logging.error(e)
-        pass
-
-class VerifyPage(webapp2.RequestHandler):
+class VerifyPage(http.server.BaseHTTPRequestHandler):
     def get(self):
         try:
             query = User.all()
@@ -1057,6 +975,7 @@ class VerifyPage(webapp2.RequestHandler):
             self.abort(502)
 
         response = json.loads(result.content)
+
         if response.get('ok') == True:
             logging.info(LOG_USER_REACHABLE.format(uid, user.get_description()))
         else:
@@ -1075,12 +994,12 @@ class VerifyPage(webapp2.RequestHandler):
                                                             error_description))
                 self.abort(502)
 
-app = webapp2.WSGIApplication([
-    ('/', MainPage),
-    ('/' + TOKEN, MainPage),
-    ('/message', MessagePage),
-    ('/promo', PromoPage),
-    ('/migrate', MigratePage),
-    ('/mass', MassPage),
-    ('/verify', VerifyPage),
-], debug=True)
+
+app_handler = [
+     ('/', MainPage),
+     ('/' + TOKEN, MainPage),
+     ('/message', MessagePage),
+     ('/promo', PromoPage),
+     ('/migrate', MigratePage),
+     ('/verify', VerifyPage),
+]

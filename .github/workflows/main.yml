@@ -12,7 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5.2.0
+    - name: Install Python dependencies
+      uses: py-actions/py-dependency-install@v4
+    - name: Setup Python
+      uses: actions/setup-python@v5.2.0
       with:
         python-version: 3.11.4
-    - run: python app.py
+    - run: pip install requirements.txt && python app.py

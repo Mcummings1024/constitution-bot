@@ -1,49 +1,40 @@
-import http.server
-import logging
 import json
+import logging
+import os
 import re
+import requests
 import textwrap
+import uuid
+import datetime
 
 from bs4 import BeautifulSoup
 from collections import OrderedDict
-from datetime import datetime, timedelta
-from urllib.request import urlopen
-from google.appengine.api import urlfetch, urlfetch_errors, taskqueue  # need replacements?
-from google.appengine.ext import db
+from datetime import datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler
 
 EMPTY = 'empty'
+TOKEN = os.environ['TG_TOKEN']
+ADMIN_ID = os.environ['ADMIN_ID']
+BOT_ID = os.environ['BOT_ID']
 
 
 def strip_markdown(string):
-    return string.replace('*', '\*').replace('_', '\_').replace('`', '\`').replace('[', '\[')
+    return string.replace('*', r'\*').replace('_', r'\_').replace('`', r'\`').replace('[', r'\[')
 
 
 def get_passage(passage, is_amendment=False, inline_details=False):
-    def to_sup(text):
-        sups = {u'0': u'\u2070',
-                u'1': u'\xb9',
-                u'2': u'\xb2',
-                u'3': u'\xb3',
-                u'4': u'\u2074',
-                u'5': u'\u2075',
-                u'6': u'\u2076',
-                u'7': u'\u2077',
-                u'8': u'\u2078',
-                u'9': u'\u2079',
-                u'-': u'\u207b'}
-        return ''.join(sups.get(char, char) for char in text)
-
     SOURCE_URL = 'https://en.wikisource.org/wiki/Constitution_of_the_United_States_of_America'
     if is_amendment:
         SOURCE_URL = 'https://en.wikisource.org/wiki/United_States_Bill_of_Rights'
 
     try:
         logging.debug('Began fetching from remote')
-        result = urlopen(SOURCE_URL).read().decode('utf8')
+        result = requests.get(SOURCE_URL).content.decode('utf8')
         logging.debug('Finished fetching from remote')
-    except urlfetch_errors.Error as e:
+    except requests.HTTPError as e:
         logging.warning('Error fetching passage:\n' + str(e))
-        return None
+        return 'Error fetching passage.'
 
     html = result
     start = html.find('<div class="prp-pages-output')
@@ -81,7 +72,7 @@ def get_passage(passage, is_amendment=False, inline_details=False):
 
     for tag in soup.select('p'):
         tag['class'] = WANTED
-        bad_strings = tag(text=re.compile('(\*|\_|\`|\[)'))
+        bad_strings = tag(text=re.compile(r'([*_`\[])'))
         for bad_string in bad_strings:
             stripped_text = strip_markdown(bad_string)
             bad_string.replace_with(stripped_text)
@@ -103,18 +94,18 @@ def get_passage(passage, is_amendment=False, inline_details=False):
 
     logging.debug('Finished BeautifulSoup processing')
 
-    if not inline_details:
-        return final_text.strip()
-    else:
-        start = html.find('data-osis="') + 11
-        end = html.find('"', start)
-        data_osis = html[start:end]
-        qr_id = data_osis + '/'
-        qr_title = title.strip()
-        content = final_text.split('\n', 1)[1].replace('*', '').replace('_', '')
-        content = ' '.join(content.split())
-        qr_description = (content[:150] + '...') if len(content) > 153 else content
-        return final_text.strip(), qr_id, qr_title, qr_description
+    # if not inline_details:
+    return final_text.strip()
+    # else:
+    #     start = html.find('data-osis="') + 11
+    #     end = html.find('"', start)
+    #     data_osis = html[start:end]
+    #     qr_id = data_osis + '/'
+    #     qr_title = title.strip()
+    #     content = final_text.split('\n', 1)[1].replace('*', '').replace('_', '')
+    #     content = ' '.join(content.split())
+    #     qr_description = (content[:150] + '...') if len(content) > 153 else content
+    #     return final_text.strip(), qr_id, qr_title, qr_description
 
 
 def arabic_to_roman(numeral):
@@ -134,9 +125,6 @@ def arabic_to_roman(numeral):
     return "".join([a for a in roman_num(numeral)])
 
 
-print('test get_passage(3:2)')
-get_passage('3:2')
-
 # MAX_SEARCH_RESULTS = 5
 
 # def get_search_results(text, start=0):
@@ -145,8 +133,8 @@ get_passage('3:2')
 #     query = urllib.quote(text.encode('utf-8', 'ignore').lower().strip())
 #     url = BH_URL.format(query)
 #     try:
-#         result = urlfetch.fetch(url, deadline=10)
-#     except urlfetch_errors.Error as e:
+#         result = requests.fetch(url, deadline=10)
+#     except requests_errors.Error as e:
 #         logging.warning('Error fetching search results:\n' + str(e))
 #         return None
 
@@ -203,8 +191,6 @@ get_passage('3:2')
 #     return final_text
 
 
-from secrets import TOKEN, ADMIN_ID, BOT_ID, BOTFAMILY_HASH
-
 TELEGRAM_URL = 'https://api.telegram.org/bot' + TOKEN
 TELEGRAM_URL_SEND = TELEGRAM_URL + '/sendMessage'
 TELEGRAM_URL_CHAT_ACTION = TELEGRAM_URL + '/sendChatAction'
@@ -223,15 +209,15 @@ LOG_TYPE_START_EXISTING = 'Type: Start (existing user)'
 LOG_TYPE_NON_TEXT = 'Type: Non-text'
 LOG_TYPE_NON_MESSAGE = 'Type: Non-message'
 LOG_TYPE_NEW_PARTICIPANT = 'Type: New participant'
-LOG_UNRECOGNISED = 'Type: Unrecognised'
+LOG_UNRECOGNIZED = 'Type: Unrecognized'
 LOG_USER_MIGRATED = 'User {} migrated to uid {} ({})'
 LOG_USER_DELETED = 'Deleted uid {} ({})'
 LOG_USER_REACHABLE = 'Uid {} ({}) is still reachable'
 LOG_USER_UNREACHABLE = 'Unable to reach uid {} ({}): {}'
 
-RECOGNISED_ERROR_PARSE = 'Bad Request: can\'t parse'
-RECOGNISED_ERROR_MIGRATE = 'Bad Request: group chat was upgraded to a supergroup chat'
-RECOGNISED_ERRORS = ('PEER_ID_INVALID',
+RECOGNIZED_ERROR_PARSE = 'Bad Request: cannot parse'
+RECOGNIZED_ERROR_MIGRATE = 'Bad Request: group chat was upgraded to a supergroup chat'
+RECOGNIZED_ERRORS = ('PEER_ID_INVALID',
                      'Bot was blocked by the user',
                      'Forbidden: user is deleted',
                      'Forbidden: user is deactivated',
@@ -249,32 +235,32 @@ RECOGNISED_ERRORS = ('PEER_ID_INVALID',
                      'Bad Request: have no rights to send a message',
                      'Bad Request: not enough rights to send text messages to the chat',
                      'Bad Request: group chat was deactivated',
-                     RECOGNISED_ERROR_MIGRATE)
+                     RECOGNIZED_ERROR_MIGRATE)
 
 
 def telegram_post(data, deadline=10):
-    return urlfetch.fetch(url=TELEGRAM_URL_SEND, payload=data, method=urlfetch.POST,
-                          headers=JSON_HEADER, deadline=deadline)
+    return requests.post(TELEGRAM_URL_SEND, data, headers=JSON_HEADER, timeout=deadline)
 
 
 def telegram_query(uid, deadline=10):
     data = json.dumps({'chat_id': uid, 'action': 'typing'})
-    return urlfetch.fetch(url=TELEGRAM_URL_CHAT_ACTION, payload=data, method=urlfetch.POST,
-                          headers=JSON_HEADER, deadline=deadline)
+    return requests.post(TELEGRAM_URL_CHAT_ACTION, data, headers=JSON_HEADER, timeout=deadline)
 
 
-class User(db.Model):
-    username = db.StringProperty(indexed=False)
-    first_name = db.StringProperty(multiline=True, indexed=False)
-    last_name = db.StringProperty(multiline=True, indexed=False)
-    created = db.DateTimeProperty(auto_now_add=True)
-    last_received = db.DateTimeProperty(auto_now_add=True, indexed=False)
-    last_sent = db.DateTimeProperty(indexed=False)
-    reply_to = db.StringProperty(multiline=True, indexed=False)
-    promo = db.BooleanProperty(default=False)
+class User:  # (db.Model):
+    def __init__(self, uname, f_name='', l_name=''):
+        self.uid = uuid.uuid4()
+        self.username = uname  # db.StringProperty(indexed=False)
+        self.first_name = f_name  # db.StringProperty(multiline=True, indexed=False)
+        self.last_name = l_name  # db.StringProperty(multiline=True, indexed=False)
+        self.created = datetime.today()  # db.DateTimeProperty(auto_now_add=True)
+        self.last_received = datetime.today()  # DateTime (auto_now_add=True, indexed=False)
+        self.last_sent = datetime.today()  # db.DateTimeProperty(indexed=False)
+        self.reply_to = ''  # db.StringProperty(multiline=True, indexed=False)
+        self.promo = False  # db.BooleanProperty(default=False)
 
     def get_uid(self):
-        return self.key().name()
+        return str(self.uid)
 
     def get_name_string(self):
         def prep(string):
@@ -297,58 +283,58 @@ class User(db.Model):
 
     def set_promo(self, promo):
         self.promo = promo
-        self.put()
+        # self.put()
 
     def update_last_received(self):
         self.last_received = datetime.now()
-        self.put()
+        # self.put()
 
     def update_last_sent(self):
         self.last_sent = datetime.now()
-        self.put()
+        # self.put()
 
     def await_reply(self, command):
-        if command and len(command) > 1500:
+        if command is not None and len(command) > 1500:
             command = command[:1500]
         self.reply_to = command
-        self.put()
+        # self.put()
 
     def migrate_to(self, uid):
-        props = dict((prop, getattr(self, prop)) for prop in self.properties().keys())
-        props.update(key_name=str(uid))
-        new_user = User(**props)
-        new_user.put()
-        self.delete()
+        # props = dict((prop, getattr(self, prop)) for prop in self.properties().keys())
+        # props.update(key_name=str(uid))
+        new_user = User(self)  # **props)
+        # new_user.put()
+        # self.delete()
         return new_user
 
 
 def get_user(uid):
-    key = db.Key.from_path('User', str(uid))
-    user = db.get(key)
-    if user == None:
-        user = User(key_name=str(uid), first_name='-')
-        user.put()
+    # key = db.Key.from_path('User', str(uid))
+    # user = db.get(key)
+    if True:  # user == None:
+        user = User('-', '-')
+        # user.put()
     return user
 
 
 def user_exists(uid):
-    key = db.Key.from_path('User', str(uid))
-    user = db.get(key)
-    return user != None
+    # key = db.Key.from_path('User', str(uid))
+    # user = db.get(key)
+    return False  # user != None
 
 
-def update_profile(uid, uname, fname, lname):
+def update_profile(uid, uname, f_name, l_name):
     existing_user = get_user(uid)
     if existing_user:
         existing_user.username = uname
-        existing_user.first_name = fname
-        existing_user.last_name = lname
+        existing_user.first_name = f_name
+        existing_user.last_name = l_name
         existing_user.update_last_received()
         # existing_user.put()
         return existing_user
     else:
-        user = User(key_name=str(uid), username=uname, first_name=fname, last_name=lname)
-        user.put()
+        user = User(uname, f_name, l_name)
+        # user.put()
         return user
 
 
@@ -368,7 +354,7 @@ def build_inline_switch_keyboard(text, query=''):
     return {'inline_keyboard': [[inline_switch_button]]}
 
 
-def send_message(user_or_uid, text, msg_type='message', force_reply=False, markdown=False,
+def send_message(user_or_uid, text, msg_type='message', force_reply=False, is_markdown=False,
                  disable_web_page_preview=True, custom_keyboard=None, hide_keyboard=False):
     try:
         uid = str(user_or_uid.get_uid())
@@ -377,22 +363,24 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, markd
         uid = str(user_or_uid)
         user = get_user(user_or_uid)
 
-    def send_short_message(text, countdown=0):
+    def send_short_message(msg_text):
         build = {
             'chat_id': uid,
-            'text': text.replace('\a', ' ')
+            'text': msg_text.replace('\a', ' ')
         }
 
         if force_reply:
-            build['reply_markup'] = {'force_reply': True}
+            build['reply_markup'] = dict(force_reply=force_reply)
         elif custom_keyboard:
             build['reply_markup'] = custom_keyboard
         elif hide_keyboard:
-            build['reply_markup'] = {'remove_keyboard': True}
-        if markdown or msg_type in ('passage', 'result'):
+            build['reply_markup'] = {'remove_keyboard': hide_keyboard}
+
+        if is_markdown or msg_type in ('passage', 'result'):
             build['parse_mode'] = 'Markdown'
+
         if disable_web_page_preview:
-            build['disable_web_page_preview'] = True
+            build['disable_web_page_preview'] = disable_web_page_preview
 
         data = json.dumps(build)
 
@@ -401,7 +389,7 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, markd
                 'msg_type': msg_type,
                 'data': data
             })
-            taskqueue.add(url='/message', payload=payload, countdown=countdown)
+            requests.post('/message', payload)
             logging.info(LOG_ENQUEUED.format(msg_type, uid, user.get_description()))
 
         if msg_type == 'promo':
@@ -411,7 +399,7 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, markd
 
         try:
             result = telegram_post(data)
-        except urlfetch_errors.Error as e:
+        except requests.HTTPError as e:
             logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(), str(e)))
             queue_message()
             return
@@ -419,49 +407,49 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, markd
         response = json.loads(result.content)
         error_description = str(response.get('description'))
 
-        if error_description.startswith(RECOGNISED_ERROR_PARSE):
+        if error_description.startswith(RECOGNIZED_ERROR_PARSE):
             if build.get('parse_mode'):
                 del build['parse_mode']
             data = json.dumps(build)
             queue_message()
 
-        elif handle_response(response, user, uid, msg_type) == False:
+        elif not handle_response(response, user, uid, msg_type):
             queue_message()
 
     if text.strip() == '':
         return
 
     if len(text) > 4096:
-        chunks = textwrap.wrap(text, width=4096, replace_whitespace=False, drop_whitespace=False)
+        chunks = textwrap.wrap(text, 4096, replace_whitespace=False, drop_whitespace=False)
         i = 0
         for chunk in chunks:
-            send_short_message(chunk, i)
+            send_short_message(chunk)
             i += 1
     else:
         send_short_message(text)
 
 
 def handle_response(response, user, uid, msg_type):
-    if response.get('ok') == True:
+    if response.get('ok'):
         msg_id = str(response.get('result').get('message_id'))
         logging.info(LOG_SENT.format(msg_type.capitalize(), msg_id, uid, user.get_description()))
         user.update_last_sent()
 
     else:
         error_description = str(response.get('description'))
-        if error_description.startswith(RECOGNISED_ERROR_PARSE):
+        if error_description.startswith(RECOGNIZED_ERROR_PARSE):
             logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(),
                                                      error_description))
             return True
 
-        if error_description not in RECOGNISED_ERRORS:
+        if error_description not in RECOGNIZED_ERRORS:
             logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(),
                                                      error_description))
             return False
 
         logging.info(LOG_DID_NOT_SEND.format(msg_type, uid, user.get_description(),
                                              error_description))
-        if error_description == RECOGNISED_ERROR_MIGRATE:
+        if error_description == RECOGNIZED_ERROR_MIGRATE:
             new_uid = response.get('parameters', {}).get('migrate_to_chat_id')
             if new_uid:
                 user = user.migrate_to(new_uid)
@@ -481,14 +469,13 @@ def handle_response(response, user, uid, msg_type):
 def send_typing(uid):
     data = json.dumps({'chat_id': uid, 'action': 'typing'})
     try:
-        rpc = urlfetch.create_rpc()
-        urlfetch.make_fetch_call(rpc, url=TELEGRAM_URL_CHAT_ACTION, payload=data,
-                                 method=urlfetch.POST, headers=JSON_HEADER)
-    except urlfetch_errors.Error:
+        # rpc = requests.create_rpc()
+        requests.post(TELEGRAM_URL_CHAT_ACTION, data, headers=JSON_HEADER)
+    except requests.HTTPError:
         return
 
 
-class MainPage(http.server.BaseHTTPRequestHandler):
+class MainPage(BaseHTTPRequestHandler):
     BOT_USERNAME = 'usconstitutionbot'
     BOT_HANDLE = '@' + BOT_USERNAME
     BOT_DESCRIPTION = 'This bot can fetch US Constitution passages from wikisource.org.'
@@ -506,20 +493,20 @@ class MainPage(http.server.BaseHTTPRequestHandler):
            'Enjoy using Constitution Bot? Click the link below to rate it!\n' + \
            'https://telegram.me/storebot?start=' + BOT_USERNAME
 
-    UNRECOGNISED = 'Sorry {}, I couldn\'t understand that. ' + \
+    UNRECOGNIZED = 'Sorry {}, I could not understand that. ' + \
                    'Please enter one of the following commands:\n' + CMD_LIST
 
     REMOTE_ERROR = 'Sorry {}, I\'m having some difficulty accessing the site. ' + \
                    'Please try again later.'
 
-    GET_PASSAGE = 'Which constitution passage do you want to lookup?'
+    GET_PASSAGE = 'Which constitution passage do you want to look up?'
 
     # GET_SEARCH_TERM = 'Please enter what you wish to search for.\n\n' + \
     #                   'Tip: For faster results, use:\n/search make disciples\n' + \
     #                   '/search "love is patient" _(quotes to match exact phrase)_'
 
     NO_RESULTS_FOUND = 'Sorry {}, no results were found. Please try again.'
-    # VERSION_NOT_FOUND = 'Sorry {}, I couldn\'t find that version. ' + \
+    # VERSION_NOT_FOUND = 'Sorry {}, I could not find that version. ' + \
     #                     'Use /setdefault to view all available versions.'
 
     SET_DEFAULT_CHOOSE_LANGUAGE = 'Choose a language:'
@@ -534,8 +521,10 @@ class MainPage(http.server.BaseHTTPRequestHandler):
     TRY_KEYBOARD = build_inline_switch_keyboard('Try inline mode', '3:2')
 
     def get(self):
-        self.response.headers['Content-Type'] = 'text/plain'
-        self.response.write(self.BOT_USERNAME + ' backend running...\n')
+        # should I send_response(200)?
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(bytes(self.BOT_USERNAME + ' backend running...\n', 'utf-8'))
 
     def post(self):
         data = json.loads(self.request.body)
@@ -545,12 +534,6 @@ class MainPage(http.server.BaseHTTPRequestHandler):
         chosen_inline_result = data.get('chosen_inline_result')
 
         if inline_query:
-            uid = inline_query.get('from').get('id')
-            if user_exists:
-                user = get_user(uid)
-            else:
-                user = None
-
             qid = inline_query.get('id')
             query = inline_query.get('query').encode('utf-8', 'ignore')
 
@@ -564,8 +547,9 @@ class MainPage(http.server.BaseHTTPRequestHandler):
                 else:
                     response = get_passage(query, inline_details=True)
 
+                results = []
                 if not response:
-                    self.abort(502)
+                    self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
                 elif response == EMPTY:
                     results = []
                 else:
@@ -579,14 +563,15 @@ class MainPage(http.server.BaseHTTPRequestHandler):
                                 'description': qr_description, 'input_message_content': content,
                                 'thumb_url': ''}]
 
-            default_version = 'NIV'  # todo: remove
+            # default_version = 'NIV'
             payload = {'method': 'answerInlineQuery', 'inline_query_id': qid, 'results': results,
-                       'switch_pm_text': 'Default version: ' + default_version,
+                       # 'switch_pm_text': 'Default version: ' + default_version,
                        'switch_pm_parameter': 'setdefault', 'cache_time': 0}
 
             output = json.dumps(payload)
-            self.response.headers['Content-Type'] = 'application/json'
-            self.response.write(output)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(bytes(output, 'utf-8'))
             logging.info('Answered inline query')
             logging.debug(output)
             return
@@ -610,7 +595,7 @@ class MainPage(http.server.BaseHTTPRequestHandler):
 
         name = first_name.encode('utf-8', 'ignore').strip()
         text = msg.get('text')
-        raw_text = text
+        # raw_text = text
         if text:
             text = text.encode('utf-8', 'ignore')
             logging.info(text)
@@ -623,10 +608,10 @@ class MainPage(http.server.BaseHTTPRequestHandler):
             user = update_profile(uid, None, group_name, None)
             group_name = group_name.encode('utf-8', 'ignore')
 
-        if text == '/botfamily_verification_code':
-            send_message(user, BOTFAMILY_HASH)
-            send_message(ADMIN_ID, 'Botfamily verified! :D')
-            return
+        # if text == '/bot_family_verification_code':
+        #     send_message(user, BOT_FAMILY_HASH)
+        #     send_message(ADMIN_ID, 'Bot-family verified! :D')
+        #     return
 
         def get_from_string():
             name_string = name
@@ -663,7 +648,7 @@ class MainPage(http.server.BaseHTTPRequestHandler):
                     new_alert = 'New group: "{}" via user: {}'.format(group_name, get_from_string())
                 else:
                     new_alert = 'New user: ' + get_from_string()
-                send_message(ADMIN_ID, new_alert)
+                # send_message(ADMIN_ID, new_alert)
 
             return
 
@@ -680,8 +665,8 @@ class MainPage(http.server.BaseHTTPRequestHandler):
         def is_get_command():
             return text.lower().startswith('/get')
 
-        # def is_full_set_default_command():
-        #     return text.lower().startswith('/setdefault ')
+        # def is_get_amd_command():
+        #     return text.lower().startswith('/getAmd')
 
         # def is_full_search_command():
         #     return text.lower().startswith('/search ')
@@ -699,7 +684,7 @@ class MainPage(http.server.BaseHTTPRequestHandler):
 
         if is_command('get'):
             user.await_reply('get')
-            is_amendment = user.version
+            # is_amendment = user.version
             send_message(user, self.GET_PASSAGE, force_reply=True)
 
         # elif is_command('search'):
@@ -720,20 +705,19 @@ class MainPage(http.server.BaseHTTPRequestHandler):
             first_passage_word = passage.split()[0].upper()
 
             if len(first_word) == 4 and passage[len(first_passage_word) + 1:].strip():
-                is_amendment = first_passage_word == 'AMD'
                 passage = passage[len(first_passage_word) + 1:]
 
             send_typing(uid)
-            response = get_passage(passage, is_amendment)
+            response = get_passage(passage, first_passage_word == 'AMD')
 
             if response == EMPTY:
                 send_message(user, self.NO_RESULTS_FOUND.format(name))
                 return
-            elif response == None:
+            elif response is None:
                 send_message(user, self.REMOTE_ERROR.format(name))
                 return
 
-            send_message(user, response, msg_type='passage')
+            send_message(user, response, 'passage')
 
         # elif is_full_set_default_command():
         #     user.await_reply(None)
@@ -793,9 +777,9 @@ class MainPage(http.server.BaseHTTPRequestHandler):
             user.await_reply(None)
             send_message(user, self.HELP.format(name), custom_keyboard=self.TRY_KEYBOARD)
 
-        elif is_command('settings'):
-            user.await_reply(None)
-            send_message(user, self.SETTINGS.format(user.version), markdown=True)
+        # elif is_command('settings'):
+        #     user.await_reply(None)
+        #     send_message(user, self.SETTINGS.format(user.version), is_markdown=True)
 
         # elif is_link_command():
         #     user.await_reply(None)
@@ -870,14 +854,14 @@ class MainPage(http.server.BaseHTTPRequestHandler):
                 send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
                 return
 
-            send_message(user, response, msg_type='passage', hide_keyboard=True)
+            send_message(user, response, 'passage', hide_keyboard=True)
 
         else:
             user.await_reply(None)
             msg_reply = msg.get('reply_to_message')
             if user.is_group() and self.BOT_HANDLE not in text and \
                     not (msg_reply and str(msg_reply.get('from').get('id')) == BOT_ID):
-                logging.info(LOG_UNRECOGNISED)
+                logging.info(LOG_UNRECOGNIZED)
                 return
 
             # to_lookup = text.lower().replace(self.BOT_HANDLE, '')
@@ -897,102 +881,108 @@ class MainPage(http.server.BaseHTTPRequestHandler):
             #         send_message(user, response, msg_type='passage', hide_keyboard=True)
             #         return
 
-            logging.info(LOG_UNRECOGNISED)
-            send_message(user, self.UNRECOGNISED.format(name), custom_keyboard=self.TRY_KEYBOARD)
+            logging.info(LOG_UNRECOGNIZED)
+            send_message(user, self.UNRECOGNIZED.format(name), custom_keyboard=self.TRY_KEYBOARD)
 
 
-class MessagePage(http.server.BaseHTTPRequestHandler):
+class MessagePage(BaseHTTPRequestHandler):
     def post(self):
         params = json.loads(self.request.body)
         msg_type = params.get('msg_type')
         data = params.get('data')
         uid = str(json.loads(data).get('chat_id'))
         user = get_user(uid)
+        result = requests.models.Response()
 
         try:
             result = telegram_post(data, deadline=30)
-        except urlfetch_errors.Error as e:
+        except requests.HTTPError as e:
             logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(), str(e)))
             logging.debug(data)
-            self.abort(502)
+            self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
 
         response = json.loads(result.content)
 
-        if handle_response(response, user, uid, msg_type) == False:
+        if not handle_response(response, user, uid, msg_type):
             logging.debug(data)
-            self.abort(502)
+            self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
 
 
-class MigratePage(http.server.BaseHTTPRequestHandler):
+class MigratePage(BaseHTTPRequestHandler):
     def get(self):
-        self.response.headers['Content-Type'] = 'text/plain'
-        self.response.write('Migrate page\n')
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(bytes('Migrate page\n', 'utf-8'))
 
 
-class PromoPage(http.server.BaseHTTPRequestHandler):
-    @staticmethod
-    def get():
-        taskqueue.add(url='/promo')
+class PromoPage(BaseHTTPRequestHandler):
+    # @staticmethod
+    # def get():
+    #     taskqueue.add(url='/promo')
 
-    @staticmethod
-    def post():
-        three_days_ago = datetime.now() - timedelta(days=3)
-        query = User.all()
-        query.filter('promo =', False)
-        query.filter('created <', three_days_ago)
-        for user in query.run(batch_size=500):
-            name = user.first_name.encode('utf-8', 'ignore').strip()
-            if user.is_group():
-                promo_msg = 'Hello, friends in {}! '.format(name) + \
-                            'Do you find Constitution Bot useful?'
-            else:
-                promo_msg = 'Hi {}, do you find Constitution Bot useful?'.format(name)
-            promo_msg += ' Why not rate it on the bot store (you don\'t have to exit' + \
-                         ' Telegram)!\nhttps://telegram.me/storebot?start=usconstitutionbot'
-            send_message(user, promo_msg, msg_type='promo')
+    def post(self):
+        params = json.loads(self.request.body)
+        data = params.get('data')
+        uid = str(json.loads(data).get('chat_id'))
+        user = get_user(uid)
+        # three_days_ago = datetime.now() - timedelta(days=3)
+        # query = User.all()
+        # query.filter('promo =', False)
+        # query.filter('created <', three_days_ago)
+        # for user in query.run(batch_size=500):
+        name = user.first_name.encode('utf-8', 'ignore').strip()
+        if user.is_group():
+            promo_msg = 'Hello, friends in {}! '.format(name) + \
+                        'Do you find Constitution Bot useful?'
+        else:
+            promo_msg = 'Hi {}, do you find Constitution Bot useful?'.format(name)
+        promo_msg += ' Why not rate it on the bot store (you don\'t have to exit Telegram)!\n' + \
+                     'https://telegram.me/storebot?start=usconstitutionbot'
+        send_message(user, promo_msg, 'promo')
 
 
-class VerifyPage(http.server.BaseHTTPRequestHandler):
+class VerifyPage(BaseHTTPRequestHandler):
     def get(self):
         try:
-            query = User.all()
-            for user in query.run(batch_size=3000):
-                uid = str(user.get_uid())
-                taskqueue.add(url='/verify', payload=uid)
-            self.response.headers['Content-Type'] = 'text/plain'
-            self.response.write('Cleanup in progress\n')
+            # query = User.all()
+            # for user in query.run(batch_size=3000):
+            # uid = str(user.get_uid())
+            # taskqueue.add(url='/verify', payload=uid)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(bytes('Cleanup in progress\n', 'utf-8'))
         except Exception as e:
             logging.error(e)
 
     def post(self):
         uid = self.request.body
         user = get_user(uid)
-
+        result = {}
         try:
-            result = telegram_query(uid, deadline=30)
+            result = telegram_query(uid, 30)
         except Exception as e:
             logging.warning(LOG_ERROR_QUERY.format(uid, user.get_description(), str(e)))
-            self.abort(502)
+            self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
 
         response = json.loads(result.content)
 
-        if response.get('ok') == True:
+        if response.get('ok'):
             logging.info(LOG_USER_REACHABLE.format(uid, user.get_description()))
         else:
             error_description = str(response.get('description'))
-            if error_description == RECOGNISED_ERROR_MIGRATE:
+            if error_description == RECOGNIZED_ERROR_MIGRATE:
                 new_uid = response.get('parameters', {}).get('migrate_to_chat_id')
                 if new_uid:
                     user = user.migrate_to(new_uid)
                     logging.info(LOG_USER_MIGRATED.format(uid, new_uid, user.get_description()))
-            elif error_description in RECOGNISED_ERRORS:
+            elif error_description in RECOGNIZED_ERRORS:
                 user_description = user.get_description()
-                user.delete()
+                # user.delete()
                 logging.info(LOG_USER_DELETED.format(uid, user_description))
             else:
                 logging.warning(LOG_USER_UNREACHABLE.format(uid, user.get_description(),
                                                             error_description))
-                self.abort(502)
+                self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
 
 
 app_handler = [

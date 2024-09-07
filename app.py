@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Optional, Set, List
 
 from constitutionbot import app_handler
 from telegram import Update
@@ -25,16 +26,12 @@ def bot(
     # application.add_error_handler(error_handler.error_handler)
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(
-        CommandHandler("message", app_handler.story_item)
-    )
+    application.add_handler(CommandHandler("message", app_handler.story_item))
     application.add_handler(CommandHandler("profile", app_handler.profile))
-    application.add_handler(
-        CommandHandler("profileid", app_handler.profile_id)
-    )
+    application.add_handler(CommandHandler("profileid", app_handler.profile_id))
 
     application.add_handler(InlineQueryHandler(app_handler.inlinequery))
-    
+
     #     ('/', MainPage),
     #     ('/' + TOKEN, MainPage),
     #     ('/message', MessagePage),
@@ -144,8 +141,8 @@ def main() -> None:
 
     bot(
         os.environ.get("TG_TOKEN") if "TG_TOKEN" in os.environ else args.token,
-        args.ig_user,
-        user_whitelist,
+        # args.ig_user,
+        # user_whitelist,
     )
 
 

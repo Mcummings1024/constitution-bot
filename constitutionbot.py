@@ -17,8 +17,8 @@ from telegram.ext import CommandHandler, CallbackContext
 
 EMPTY = 'empty'
 TOKEN = os.environ['TG_TOKEN']
-ADMIN_ID = ''#os.environ['ADMIN_ID']
-BOT_ID = ''#os.environ['BOT_ID']
+ADMIN_ID = os.environ['ADMIN_ID']
+BOT_ID = os.environ['BOT_ID']
 
 
 def strip_markdown(string):

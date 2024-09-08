@@ -124,7 +124,7 @@ def main() -> None:
         user_whitelist = set(args.whitelist)
         logging.info("Authorized users: %s", user_whitelist)
 
-    token = os.environ.get("TG_TOKEN") if "TG_TOKEN" in os.environ else args.token
+    token = os.environ['TG_TOKEN']
     application = Application.builder().token(token).build()
 
     # application.add_error_handler(error_handler.error_handler)

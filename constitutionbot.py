@@ -12,11 +12,13 @@ from collections import OrderedDict
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
+from telegram import Update
+from telegram.ext import CommandHandler, CallbackContext
 
 EMPTY = 'empty'
 TOKEN = os.environ['TG_TOKEN']
-ADMIN_ID = os.environ['ADMIN_ID']
-BOT_ID = os.environ['BOT_ID']
+ADMIN_ID = ''#os.environ['ADMIN_ID']
+BOT_ID = ''#os.environ['BOT_ID']
 
 
 def strip_markdown(string):
@@ -123,72 +125,6 @@ def arabic_to_roman(numeral):
                 break
 
     return "".join([a for a in roman_num(numeral)])
-
-
-# MAX_SEARCH_RESULTS = 5
-
-# def get_search_results(text, start=0):
-#     BH_URL = 'http://biblehub.net/search.php?q={}'
-
-#     query = urllib.quote(text.encode('utf-8', 'ignore').lower().strip())
-#     url = BH_URL.format(query)
-#     try:
-#         result = requests.fetch(url, deadline=10)
-#     except requests_errors.Error as e:
-#         logging.warning('Error fetching search results:\n' + str(e))
-#         return None
-
-#     html = result.content
-#     soup = BeautifulSoup(html, 'lxml')
-
-#     headers = soup.select('.l')
-#     bodies = soup.select('.s')
-
-#     num_results = len(headers)
-
-#     if num_results == 0 or start >= num_results:
-#         return EMPTY
-
-#     results_body = ''
-#     end = min(num_results, start + MAX_SEARCH_RESULTS)
-#     for i in range(start, end):
-#         header = headers[i].text
-
-#         idx = header.find(':')
-#         idx += header[idx:].find(' ')
-#         title = strip_markdown(header[:idx].strip())
-
-#         body = bodies[i]
-
-#         bad_strings = body(text=re.compile('(\*|\_)'))
-#         for bad_string in bad_strings:
-#             stripped_text = strip_markdown(unicode(bad_string))
-#             bad_string.replace_with(stripped_text)
-
-#         for tag in body('b'):
-#             if tag.text == u'...':
-#                 continue
-#             tag.string = '*' + tag.text + '*'
-
-#         body_text = body.text
-#         idx = body_text.rfind('//biblehub.com')
-#         description = ' '.join(body_text[:idx].split())
-
-#         link = '/' + ''.join(title.split()).lower().replace(':', 'V')
-
-#         results_body += u'\U0001F539' + title + '\n' + description + '\n' + link + '\n\n'
-
-#     final_text = 'Search results'
-
-#     if num_results > MAX_SEARCH_RESULTS:
-#         final_text += ' ({}-{} of {})'.format(start + 1, end, num_results)
-
-#     final_text += '\n\n' + results_body.strip()
-
-#     if start + MAX_SEARCH_RESULTS < num_results:
-#         final_text += '\n\nGet /more results'
-
-#     return final_text
 
 
 TELEGRAM_URL = 'https://api.telegram.org/bot' + TOKEN
@@ -385,11 +321,7 @@ def send_message(user_or_uid, text, msg_type='message', force_reply=False, is_ma
         data = json.dumps(build)
 
         def queue_message():
-            payload = json.dumps({
-                'msg_type': msg_type,
-                'data': data
-            })
-            requests.post('/message', payload)
+            requests.post(TELEGRAM_URL_SEND, data, headers=JSON_HEADER, timeout=10)
             logging.info(LOG_ENQUEUED.format(msg_type, uid, user.get_description()))
 
         if msg_type == 'promo':
@@ -475,7 +407,7 @@ def send_typing(uid):
         return
 
 
-class MainPage(BaseHTTPRequestHandler):
+async def main_cmd(update: Update, context: CallbackContext):
     BOT_USERNAME = 'usconstitutionbot'
     BOT_HANDLE = '@' + BOT_USERNAME
     BOT_DESCRIPTION = 'This bot can fetch US Constitution passages from wikisource.org.'
@@ -509,403 +441,322 @@ class MainPage(BaseHTTPRequestHandler):
     # VERSION_NOT_FOUND = 'Sorry {}, I could not find that version. ' + \
     #                     'Use /setdefault to view all available versions.'
 
-    SET_DEFAULT_CHOOSE_LANGUAGE = 'Choose a language:'
+    # SET_DEFAULT_CHOOSE_LANGUAGE = 'Choose a language:'
     # SET_DEFAULT_CHOOSE_VERSION = 'Select a version:'
     # SET_DEFAULT_SUCCESS = 'Success! Default version is now *{}*.'
     # SET_DEFAULT_FAILURE = VERSION_NOT_FOUND + '\n\nCurrent default is *{}*.'
 
     # SETTINGS = 'Current default version is *{}*. Use /setdefault to change it.'
 
-    BACK_TO_LANGUAGES = u'\U0001F519' + ' to language list'
+    # BACK_TO_LANGUAGES = u'\U0001F519' + ' to language list'
 
     TRY_KEYBOARD = build_inline_switch_keyboard('Try inline mode', '3:2')
 
-    def get(self):
-        # should I send_response(200)?
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(bytes(self.BOT_USERNAME + ' backend running...\n', 'utf-8'))
+    logging.debug(update.inline_query)
 
-    def post(self):
-        data = json.loads(self.request.body)
-        logging.debug(self.request.body)
+    inline_query = update.inline_query.query
+    chosen_inline_result = update.chosen_inline_result
 
-        inline_query = data.get('inline_query')
-        chosen_inline_result = data.get('chosen_inline_result')
-
-        if inline_query:
-            qid = inline_query.get('id')
-            query = inline_query.get('query').encode('utf-8', 'ignore')
-
-            if not query:
-                results = []
-            else:
-                words = query.split()
-                if len(words) > 1 and words[0].upper() == 'AMD':
-                    passage = words[1]
-                    response = get_passage(passage, is_amendment=True, inline_details=True)
-                else:
-                    response = get_passage(query, inline_details=True)
-
-                results = []
-                if not response:
-                    self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
-                elif response == EMPTY:
-                    results = []
-                else:
-                    passage = response[0]
-                    qr_id = response[1]
-                    qr_title = response[2]
-                    qr_description = response[3]
-                    content = {'message_text': passage, 'parse_mode': 'Markdown',
-                               'disable_web_page_preview': True}
-                    results = [{'type': 'article', 'id': qr_id, 'title': qr_title,
-                                'description': qr_description, 'input_message_content': content,
-                                'thumb_url': ''}]
-
-            # default_version = 'NIV'
-            payload = {'method': 'answerInlineQuery', 'inline_query_id': qid, 'results': results,
-                       # 'switch_pm_text': 'Default version: ' + default_version,
-                       'switch_pm_parameter': 'setdefault', 'cache_time': 0}
-
-            output = json.dumps(payload)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(bytes(output, 'utf-8'))
-            logging.info('Answered inline query')
-            logging.debug(output)
-            return
-        elif chosen_inline_result:
-            logging.info('Inline query result used')
-            logging.debug(str(chosen_inline_result))
-            return
-
-        msg = data.get('message')
-        if not msg:
-            logging.info(LOG_TYPE_NON_MESSAGE)
-            return
-
-        msg_chat = msg.get('chat')
-        msg_from = msg.get('from')
-
-        uid = str(msg_chat.get('id'))
-        first_name = msg_from.get('first_name')
-        last_name = msg_from.get('last_name')
-        username = msg_from.get('username')
-
-        name = first_name.encode('utf-8', 'ignore').strip()
-        text = msg.get('text')
-        # raw_text = text
-        if text:
-            text = text.encode('utf-8', 'ignore')
-            logging.info(text)
-
-        if msg_chat.get('type') == 'private':
-            group_name = name
-            user = update_profile(uid, username, first_name, last_name)
+    if inline_query:
+        words = inline_query.split()
+        if len(words) > 1 and words[0].upper() == 'AMD':
+            passage = words[1]
+            response = get_passage(passage, True, True)
         else:
-            group_name = msg_chat.get('title')
-            user = update_profile(uid, None, group_name, None)
-            group_name = group_name.encode('utf-8', 'ignore')
+            response = get_passage(inline_query, inline_details=True)
 
-        # if text == '/bot_family_verification_code':
-        #     send_message(user, BOT_FAMILY_HASH)
-        #     send_message(ADMIN_ID, 'Bot-family verified! :D')
-        #     return
+        results = []
+        if not response:
+            logging.error(HTTPStatus.BAD_GATEWAY)  # 502
+        elif response == EMPTY:
+            results = []
+        else:
+            passage = response[0]
+            qr_id = response[1]
+            qr_title = response[2]
+            qr_description = response[3]
+            content = {'message_text': passage, 'parse_mode': 'Markdown',
+                       'disable_web_page_preview': True}
+            results = [{'type': 'article', 'id': qr_id, 'title': qr_title,
+                        'description': qr_description, 'input_message_content': content,
+                        'thumb_url': ''}]
 
-        def get_from_string():
-            name_string = name
-            if last_name:
-                name_string += ' ' + last_name.encode('utf-8', 'ignore').strip()
-            if username:
-                name_string += ' @' + username.encode('utf-8', 'ignore').strip()
-            return name_string
+        payload = {'method': 'answerInlineQuery', 'results': results,
+                   'switch_pm_parameter': 'setdefault', 'cache_time': 0}
 
-        if user.last_sent is None or text == '/start':
-            if user.is_group() and msg.get('new_chat_members'):
-                new_chat_member_ids = [str(m.get('id')) for m in msg.get('new_chat_members')]
-                if BOT_ID not in new_chat_member_ids:
-                    logging.info(LOG_TYPE_NEW_PARTICIPANT)
-                    return
+        output = json.dumps(payload)
+        await context.bot.answer_inline_query(update.inline_query.id, results)
+        logging.info('Answered inline query')
+        logging.debug(output)
+        return
+    elif chosen_inline_result:
+        logging.info('Inline query result used')
+        logging.debug(str(chosen_inline_result))
+        return
 
-            if user.last_sent is None:
-                logging.info(LOG_TYPE_START_NEW)
-                new_user = True
-            else:
-                logging.info(LOG_TYPE_START_EXISTING)
-                new_user = False
+    msg = update.message
+    if not msg:
+        logging.info(LOG_TYPE_NON_MESSAGE)
+        return
 
+    msg_chat = msg.chat
+    msg_from = msg.from_user
+
+    uid = str(msg_chat.id)
+    first_name = msg_from.first_name
+    last_name = msg_from.last_name
+    username = msg_from.username
+
+    name = first_name.encode('utf-8', 'ignore').strip()
+    text = msg.text
+    if text:
+        text = text.encode('utf-8', 'ignore')
+        logging.info(text)
+
+    if msg_chat.type == 'private':
+        group_name = name
+        user = update_profile(uid, username, first_name, last_name)
+    else:
+        group_name = msg_chat.title
+        user = update_profile(uid, None, group_name, None)
+        group_name = group_name.encode('utf-8', 'ignore')
+
+    def get_from_string():
+        name_string = name
+        if last_name:
+            name_string += ' ' + last_name.encode(errors='ignore').strip()
+        if username:
+            name_string += ' @' + username.encode(errors='ignore').strip()
+        return name_string
+
+    if user.last_sent is None or text == '/start':
+        if user.is_group() and msg.new_chat_members:
+            new_chat_member_ids = [str(m.id) for m in msg.new_chat_members]
+            if BOT_ID not in new_chat_member_ids:
+                logging.info(LOG_TYPE_NEW_PARTICIPANT)
+                return
+
+        if user.last_sent is None:
+            logging.info(LOG_TYPE_START_NEW)
+            new_user = True
+        else:
+            logging.info(LOG_TYPE_START_EXISTING)
+            new_user = False
+
+        if user.is_group():
+            response = WELCOME_GROUP.format(group_name)
+        else:
+            response = WELCOME_USER.format(name)
+        response += WELCOME_GET_STARTED
+        send_message(user, response, 'welcome', custom_keyboard=TRY_KEYBOARD)
+        user.await_reply(None)
+
+        if new_user:
             if user.is_group():
-                response = self.WELCOME_GROUP.format(group_name)
+                new_alert = 'New group: "{}" via user: {}'.format(group_name, get_from_string())
             else:
-                response = self.WELCOME_USER.format(name)
-            response += self.WELCOME_GET_STARTED
-            send_message(user, response, msg_type='welcome', custom_keyboard=self.TRY_KEYBOARD)
-            user.await_reply(None)
+                new_alert = 'New user: ' + get_from_string()
+            # send_message(ADMIN_ID, new_alert)
 
-            if new_user:
-                if user.is_group():
-                    new_alert = 'New group: "{}" via user: {}'.format(group_name, get_from_string())
-                else:
-                    new_alert = 'New user: ' + get_from_string()
-                # send_message(ADMIN_ID, new_alert)
+        return
 
+    if text is None:
+        logging.info(LOG_TYPE_NON_TEXT)
+        migrate_to_chat_id = msg.migrate_to_chat_id
+        if migrate_to_chat_id:
+            new_uid = migrate_to_chat_id
+            user = user.migrate_to(new_uid)
+            logging.info(LOG_USER_MIGRATED.format(uid, new_uid, user.get_description()))
+        return
+    text = text.strip()
+
+    def is_get_command():
+        return text.lower().startswith('/get')
+
+    # def is_get_amd_command():
+    #     return text.lower().startswith('/getAmd')
+
+    # def is_full_search_command():
+    #     return text.lower().startswith('/search ')
+
+    # def is_link_command():
+    #     return text[1:].startswith(BOOKS)
+
+    def is_command(word):
+        cmd = text.lower().strip()
+        short_cmd = ''.join(cmd.split())
+        slash_word = '/' + word
+        left_pattern = slash_word + BOT_HANDLE
+        right_pattern = BOT_HANDLE + slash_word
+        return cmd == slash_word or short_cmd.startswith((left_pattern, right_pattern))
+
+    if is_command('get'):
+        user.await_reply('get')
+        send_message(user, GET_PASSAGE, force_reply=True)
+
+    # elif is_command('search'):
+    #     user.await_reply('search')
+    #     send_message(user, self.GET_SEARCH_TERM, force_reply=True, markdown=True)
+
+    elif is_get_command():
+        user.await_reply(None)
+        words = text.split()
+        first_word = words[0]
+
+        passage = text[len(first_word) + 1:].strip()
+        if not passage:
+            user.await_reply(first_word[1:])
+            send_message(user, GET_PASSAGE, force_reply=True)
             return
 
-        if text is None:
-            logging.info(LOG_TYPE_NON_TEXT)
-            migrate_to_chat_id = msg.get('migrate_to_chat_id')
-            if migrate_to_chat_id:
-                new_uid = migrate_to_chat_id
-                user = user.migrate_to(new_uid)
-                logging.info(LOG_USER_MIGRATED.format(uid, new_uid, user.get_description()))
+        first_passage_word = passage.split()[0].upper()
+
+        if len(first_word) == 4 and passage[len(first_passage_word) + 1:].strip():
+            passage = passage[len(first_passage_word) + 1:]
+
+        send_typing(uid)
+        response = get_passage(passage, first_passage_word == 'AMD')
+
+        if response == EMPTY:
+            send_message(user, NO_RESULTS_FOUND.format(name))
             return
-        text = text.strip()
+        elif response is None:
+            send_message(user, REMOTE_ERROR.format(name))
+            return
 
-        def is_get_command():
-            return text.lower().startswith('/get')
+        send_message(user, response, 'passage')
 
-        # def is_get_amd_command():
-        #     return text.lower().startswith('/getAmd')
+    elif is_command('help'):
+        user.await_reply(None)
+        send_message(user, HELP.format(name), custom_keyboard=TRY_KEYBOARD)
 
-        # def is_full_search_command():
-        #     return text.lower().startswith('/search ')
+    # elif is_command('settings'):
+    #     user.await_reply(None)
+    #     send_message(user, self.SETTINGS.format(user.version), is_markdown=True)
 
-        # def is_link_command():
-        #     return text[1:].startswith(BOOKS)
+    # elif is_link_command():
+    #     user.await_reply(None)
+    #     passage = text[1:].replace('V', ':')
+    #     if passage.endswith(self.BOT_HANDLE):
+    #         passage = passage[:-len(self.BOT_HANDLE)]
 
-        def is_command(word):
-            cmd = text.lower().strip()
-            short_cmd = ''.join(cmd.split())
-            slash_word = '/' + word
-            left_pattern = slash_word + self.BOT_HANDLE
-            right_pattern = self.BOT_HANDLE + slash_word
-            return cmd == slash_word or short_cmd.startswith((left_pattern, right_pattern))
+    #     send_typing(uid)
+    #     response = get_passage(passage, user.version)
 
-        if is_command('get'):
-            user.await_reply('get')
-            # is_amendment = user.version
-            send_message(user, self.GET_PASSAGE, force_reply=True)
+    #     if response == EMPTY:
+    #         send_message(user, self.NO_RESULTS_FOUND.format(name))
+    #         logging.info(LOG_ERROR_INVALID_LINK + text)
+    #         return
+    #     elif response == None:
+    #         send_message(user, self.REMOTE_ERROR.format(name))
+    #         return
 
-        # elif is_command('search'):
-        #     user.await_reply('search')
-        #     send_message(user, self.GET_SEARCH_TERM, force_reply=True, markdown=True)
+    #     send_message(user, response, msg_type='passage')
 
-        elif is_get_command():
-            user.await_reply(None)
-            words = text.split()
-            first_word = words[0]
+    # elif text in ('/more', '/more' + self.BOT_HANDLE) and user.reply_to != None and \
+    #      user.reply_to.startswith('search') and len(user.reply_to) > 6:
+    #     idx = user.reply_to.find(' ')
+    #     old_start = int(user.reply_to[6:idx])
+    #     search_term = user.reply_to[idx + 1:]
 
-            passage = text[len(first_word) + 1:].strip()
-            if not passage:
-                user.await_reply(first_word[1:])
-                send_message(user, self.GET_PASSAGE, force_reply=True)
-                return
+    #     new_start = old_start + MAX_SEARCH_RESULTS
 
-            first_passage_word = passage.split()[0].upper()
+    #     user.await_reply('search{} '.format(new_start) + search_term)
 
-            if len(first_word) == 4 and passage[len(first_passage_word) + 1:].strip():
-                passage = passage[len(first_passage_word) + 1:]
+    #     send_typing(uid)
+    #     response = get_search_results(search_term, new_start)
 
-            send_typing(uid)
-            response = get_passage(passage, first_passage_word == 'AMD')
+    #     if response == EMPTY:
+    #         user.await_reply(None)
+    #         send_message(user, self.NO_RESULTS_FOUND.format(name))
+    #         return
+    #     elif response == None:
+    #         send_message(user, self.REMOTE_ERROR.format(name))
+    #         return
 
-            if response == EMPTY:
-                send_message(user, self.NO_RESULTS_FOUND.format(name))
-                return
-            elif response is None:
-                send_message(user, self.REMOTE_ERROR.format(name))
-                return
+    #     send_message(user, response, msg_type='result')
 
-            send_message(user, response, 'passage')
+    # elif user.reply_to != None and user.reply_to == 'search':
+    #     search_term = text
+    #     user.await_reply('search0 ' + raw_text)
 
-        # elif is_full_set_default_command():
-        #     user.await_reply(None)
-        #     version = text[12:].strip().upper()
+    #     send_typing(uid)
+    #     response = get_search_results(search_term)
 
-        #     if version not in VERSIONS:
-        #         send_message(user, self.SET_DEFAULT_FAILURE.format(name, user.version),
-        #                      markdown=True)
-        #         return
+    #     if response == EMPTY:
+    #         user.await_reply(None)
+    #         send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
+    #         return
+    #     elif response == None:
+    #         send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
+    #         return
 
-        #     user.update_version(version)
-        #     send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True)
+    #     send_message(user, response, msg_type='result', hide_keyboard=True)
 
-        # elif is_full_search_command():
-        #     search_term = raw_text[8:].strip().lower()
-        #     user.await_reply('search0 ' + raw_text[8:].strip().lower())
+    elif user.reply_to is not None and user.reply_to.startswith('get'):
+        is_amendment = user.reply_to[3:].upper() == 'AMD'
+        user.await_reply(None)
 
-        #     send_typing(uid)
-        #     response = get_search_results(search_term)
+        send_typing(uid)
+        response = get_passage(text, is_amendment)
 
-        #     if response == EMPTY:
-        #         user.await_reply(None)
-        #         send_message(user, self.NO_RESULTS_FOUND.format(name))
-        #         return
-        #     elif response == None:
-        #         send_message(user, self.REMOTE_ERROR.format(name))
-        #         return
+        if response == EMPTY:
+            send_message(user, NO_RESULTS_FOUND.format(name), hide_keyboard=True)
+            return
+        elif response is None:
+            send_message(user, REMOTE_ERROR.format(name), hide_keyboard=True)
+            return
 
-        #     send_message(user, response, msg_type='result')
+        send_message(user, response, 'passage', hide_keyboard=True)
 
-        # elif is_command('setdefault') or raw_text == self.BACK_TO_LANGUAGES or \
-        #      text == '/start setdefault':
-        #     if text == '/start setdefault':
-        #         user.await_reply('setdefault')
-        #     buttons = build_buttons(VERSION_DATA.keys())
-        #     keyboard = build_keyboard(buttons)
-        #     send_message(user, self.SET_DEFAULT_CHOOSE_LANGUAGE, custom_keyboard=keyboard)
-
-        # elif raw_text in VERSION_DATA:
-        #     buttons = build_buttons(VERSION_DATA[raw_text] + [self.BACK_TO_LANGUAGES])
-        #     keyboard = build_keyboard(buttons)
-        #     send_message(user, self.SET_DEFAULT_CHOOSE_VERSION, custom_keyboard=keyboard)
-
-        # elif raw_text in VERSION_LOOKUP:
-        #     version = VERSION_LOOKUP[raw_text]
-        #     user.update_version(version)
-        #     if user.reply_to == 'setdefault':
-        #         inline_keyboard = build_inline_switch_keyboard('Back to chat')
-        #         send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True,
-        #                      custom_keyboard=inline_keyboard)
-        #     else:
-        #         send_message(user, self.SET_DEFAULT_SUCCESS.format(version), markdown=True,
-        #                      hide_keyboard=True)
-        #     user.await_reply(None)
-
-        elif is_command('help'):
-            user.await_reply(None)
-            send_message(user, self.HELP.format(name), custom_keyboard=self.TRY_KEYBOARD)
-
-        # elif is_command('settings'):
-        #     user.await_reply(None)
-        #     send_message(user, self.SETTINGS.format(user.version), is_markdown=True)
-
-        # elif is_link_command():
-        #     user.await_reply(None)
-        #     passage = text[1:].replace('V', ':')
-        #     if passage.endswith(self.BOT_HANDLE):
-        #         passage = passage[:-len(self.BOT_HANDLE)]
-
-        #     send_typing(uid)
-        #     response = get_passage(passage, user.version)
-
-        #     if response == EMPTY:
-        #         send_message(user, self.NO_RESULTS_FOUND.format(name))
-        #         logging.info(LOG_ERROR_INVALID_LINK + text)
-        #         return
-        #     elif response == None:
-        #         send_message(user, self.REMOTE_ERROR.format(name))
-        #         return
-
-        #     send_message(user, response, msg_type='passage')
-
-        # elif text in ('/more', '/more' + self.BOT_HANDLE) and user.reply_to != None and \
-        #      user.reply_to.startswith('search') and len(user.reply_to) > 6:
-        #     idx = user.reply_to.find(' ')
-        #     old_start = int(user.reply_to[6:idx])
-        #     search_term = user.reply_to[idx + 1:]
-
-        #     new_start = old_start + MAX_SEARCH_RESULTS
-
-        #     user.await_reply('search{} '.format(new_start) + search_term)
-
-        #     send_typing(uid)
-        #     response = get_search_results(search_term, new_start)
-
-        #     if response == EMPTY:
-        #         user.await_reply(None)
-        #         send_message(user, self.NO_RESULTS_FOUND.format(name))
-        #         return
-        #     elif response == None:
-        #         send_message(user, self.REMOTE_ERROR.format(name))
-        #         return
-
-        #     send_message(user, response, msg_type='result')
-
-        # elif user.reply_to != None and user.reply_to == 'search':
-        #     search_term = text
-        #     user.await_reply('search0 ' + raw_text)
-
-        #     send_typing(uid)
-        #     response = get_search_results(search_term)
-
-        #     if response == EMPTY:
-        #         user.await_reply(None)
-        #         send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
-        #         return
-        #     elif response == None:
-        #         send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
-        #         return
-
-        #     send_message(user, response, msg_type='result', hide_keyboard=True)
-
-        elif user.reply_to is not None and user.reply_to.startswith('get'):
-            is_amendment = user.reply_to[3:].upper() == 'AMD'
-            user.await_reply(None)
-
-            send_typing(uid)
-            response = get_passage(text, is_amendment)
-
-            if response == EMPTY:
-                send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
-                return
-            elif response is None:
-                send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
-                return
-
-            send_message(user, response, 'passage', hide_keyboard=True)
-
-        else:
-            user.await_reply(None)
-            msg_reply = msg.get('reply_to_message')
-            if user.is_group() and self.BOT_HANDLE not in text and \
-                    not (msg_reply and str(msg_reply.get('from').get('id')) == BOT_ID):
-                logging.info(LOG_UNRECOGNIZED)
-                return
-
-            # to_lookup = text.lower().replace(self.BOT_HANDLE, '')
-            # refs = extract_refs(to_lookup)
-            # if refs:
-            #     ref = refs[0]
-            #     book = ref[0]
-            #     passage = '{}:{}-{}:{}'.format(book, ref[1], ref[2], ref[3], ref[4])
-
-            #     send_typing(uid)
-            #     response = get_passage(passage)
-
-            #     if response == EMPTY:
-            #         logging.error(LOG_ERROR_INVALID_QUICK + text)
-
-            #     if response and response != EMPTY:
-            #         send_message(user, response, msg_type='passage', hide_keyboard=True)
-            #         return
-
+    else:
+        user.await_reply(None)
+        msg_reply = msg.reply_to_message
+        if user.is_group() and BOT_HANDLE not in text and \
+                not (msg_reply and str(msg_reply.from_user.id) == BOT_ID):
             logging.info(LOG_UNRECOGNIZED)
-            send_message(user, self.UNRECOGNIZED.format(name), custom_keyboard=self.TRY_KEYBOARD)
+            return
+
+        # to_lookup = text.lower().replace(BOT_HANDLE, '')
+        # refs = extract_refs(to_lookup)
+        # if refs:
+        #     ref = refs[0]
+        #     book = ref[0]
+        #     passage = '{}:{}-{}:{}'.format(book, ref[1], ref[2], ref[3], ref[4])
+
+        #     send_typing(uid)
+        #     response = get_passage(passage)
+
+        #     if response == EMPTY:
+        #         logging.error(LOG_ERROR_INVALID_QUICK + text)
+
+        #     if response and response != EMPTY:
+        #         send_message(user, response, msg_type='passage', hide_keyboard=True)
+        #         return
+
+        logging.info(LOG_UNRECOGNIZED)
+        send_message(user, UNRECOGNIZED.format(name), custom_keyboard=TRY_KEYBOARD)
 
 
-class MessagePage(BaseHTTPRequestHandler):
-    def post(self):
-        params = json.loads(self.request.body)
-        msg_type = params.get('msg_type')
-        data = params.get('data')
-        uid = str(json.loads(data).get('chat_id'))
-        user = get_user(uid)
-        result = requests.models.Response()
+async def message_cmd(update: Update, context: CallbackContext):
+    msg_type = 'message'
+    data = update.message
+    uid = str(data.chat_id)
+    user = get_user(uid)
+    result = requests.models.Response()
 
-        try:
-            result = telegram_post(data, deadline=30)
-        except requests.HTTPError as e:
-            logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(), str(e)))
-            logging.debug(data)
-            self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
+    try:
+        result = telegram_post(data, deadline=30)
+    except requests.HTTPError as e:
+        logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(), str(e)))
+        logging.debug(data)
+        logging.error(HTTPStatus.BAD_GATEWAY)  # 502
 
-        response = json.loads(result.content)
+    response = json.loads(result.content)
 
-        if not handle_response(response, user, uid, msg_type):
-            logging.debug(data)
-            self.send_error(HTTPStatus.BAD_GATEWAY)  # 502
+    if not handle_response(response, user, uid, msg_type):
+        logging.debug(data)
+        logging.error(HTTPStatus.BAD_GATEWAY)  # 502
 
 
 class MigratePage(BaseHTTPRequestHandler):
@@ -986,10 +837,9 @@ class VerifyPage(BaseHTTPRequestHandler):
 
 
 app_handler = [
-     ('/', MainPage),
-     ('/' + TOKEN, MainPage),
-     ('/message', MessagePage),
-     ('/promo', PromoPage),
-     ('/migrate', MigratePage),
-     ('/verify', VerifyPage),
+     CommandHandler('get', main_cmd),
+     CommandHandler('message', message_cmd),
+     # CommandHandler('/promo', PromoPage),
+     # CommandHandler ('/migrate', MigratePage),
+     # CommandHandler('/verify', VerifyPage),
 ]

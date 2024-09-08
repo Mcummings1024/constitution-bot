@@ -1,15 +1,18 @@
 import logging
 import os
-from typing import Optional, Set, List
 
 from constitutionbot import app_handler
 from telegram import Update
 from telegram.ext import (
+    filters,
     Application,
     CallbackContext,
     CommandHandler,
+    ContextTypes,
     InlineQueryHandler,
+    MessageHandler,
 )
+from typing import Optional, Set, List
 
 
 async def start(update: Update, context: CallbackContext) -> None:
@@ -18,28 +21,9 @@ async def start(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text("Hi, lmao", quote=True)
 
 
-def bot(
-    token: str,
-) -> None:
-    application = Application.builder().token(token).build()
-
-    # application.add_error_handler(error_handler.error_handler)
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("message", app_handler.story_item))
-    application.add_handler(CommandHandler("profile", app_handler.profile))
-    application.add_handler(CommandHandler("profileid", app_handler.profile_id))
-
-    application.add_handler(InlineQueryHandler(app_handler.inlinequery))
-
-    #     ('/', MainPage),
-    #     ('/' + TOKEN, MainPage),
-    #     ('/message', MessagePage),
-    #     ('/promo', PromoPage),
-    #     ('/migrate', MigratePage),
-    #     ('/verify', VerifyPage),
-
-    application.run_polling()
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                   text="Sorry, I didn't understand that command.")
 
 
 def main() -> None:
@@ -129,6 +113,7 @@ def main() -> None:
 
     logging.info(args)
     logging.info("do_rich: %s", do_rich)
+
     if "TG_TOKEN" in os.environ:
         logging.info("TG_TOKEN: %s", os.environ.get("TG_TOKEN"))
 
@@ -139,11 +124,16 @@ def main() -> None:
         user_whitelist = set(args.whitelist)
         logging.info("Authorized users: %s", user_whitelist)
 
-    bot(
-        os.environ.get("TG_TOKEN") if "TG_TOKEN" in os.environ else args.token,
-        # args.ig_user,
-        # user_whitelist,
-    )
+    token = os.environ.get("TG_TOKEN") if "TG_TOKEN" in os.environ else args.token
+    application = Application.builder().token(token).build()
+
+    # application.add_error_handler(error_handler.error_handler)
+    application.add_handlers(app_handler)
+    application.add_handler(CommandHandler("start", start))
+    # application.add_handler(InlineQueryHandler(app_handler.inline_query))
+    application.add_handler(MessageHandler(filters.COMMAND, unknown))
+
+    application.run_polling()
 
 
 if __name__ == "__main__":

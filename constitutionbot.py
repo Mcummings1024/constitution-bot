@@ -8,126 +8,22 @@ import uuid
 import datetime
 
 from bs4 import BeautifulSoup
-from collections import OrderedDict
 from datetime import datetime
+from functools import wraps
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from telegram import Update
-from telegram.ext import CommandHandler, CallbackContext
+from telegram.ext import CallbackContext, CommandHandler
 
-EMPTY = 'empty'
-TOKEN = os.environ['TG_TOKEN']
+TG_TOKEN = os.environ['TG_TOKEN']
 ADMIN_ID = os.environ['ADMIN_ID']
 BOT_ID = os.environ['BOT_ID']
+WHITELIST_IDS = [int(id_string) for id_string in os.environ['WHITELIST_IDS'].split(',')]
 
+# region text constants
+EMPTY = 'empty'
 
-def strip_markdown(string):
-    return string.replace('*', r'\*').replace('_', r'\_').replace('`', r'\`').replace('[', r'\[')
-
-
-def get_passage(passage, is_amendment=False, inline_details=False):
-    SOURCE_URL = 'https://en.wikisource.org/wiki/Constitution_of_the_United_States_of_America'
-    if is_amendment:
-        SOURCE_URL = 'https://en.wikisource.org/wiki/United_States_Bill_of_Rights'
-
-    try:
-        logging.debug('Began fetching from remote')
-        result = requests.get(SOURCE_URL).content.decode('utf8')
-        logging.debug('Finished fetching from remote')
-    except requests.HTTPError as e:
-        logging.warning('Error fetching passage:\n' + str(e))
-        return 'Error fetching passage.'
-
-    html = result
-    start = html.find('<div class="prp-pages-output')
-    if start == -1:
-        return EMPTY
-    end = html.find('<table>', start)  # not sure if consistent/good
-    passage_html = html[start:end - 1]
-
-    soup = BeautifulSoup(passage_html, 'lxml')
-
-    # format of html element ids: aIV[-s#][-c#]
-    passage_id = 'a' + arabic_to_roman(int(passage[0]))
-
-    title = 'Article ' + passage_id[1:]
-    header = '*' + strip_markdown(title.strip()) + '*'
-
-    # need every dd.p in dl after article start
-    for tag in soup.select('[id=' + passage_id + '], [id^=' + passage_id + ']'):
-        print(tag.text)
-
-    WANTED = 'bg-bot-passage-text'
-    # UNWANTED = '.passage-other-trans, .footnote, .footnotes, .crossreference, .cross-refs'
-
-    # for tag in soup.select(UNWANTED):
-    #     tag.decompose()
-
-    for tag in soup.select('h1, h2, h3, h4, h5, h6'):
-        tag['class'] = WANTED
-        text = tag.text.strip()
-        if not inline_details:
-            text = text.replace(' ', '\a')
-        tag.string = '*' + strip_markdown(text) + '*'
-
-    needed_stripping = False
-
-    for tag in soup.select('p'):
-        tag['class'] = WANTED
-        bad_strings = tag(text=re.compile(r'([*_`\[])'))
-        for bad_string in bad_strings:
-            stripped_text = strip_markdown(bad_string)
-            bad_string.replace_with(stripped_text)
-            needed_stripping = True
-
-    if needed_stripping:
-        logging.info('Stripped markdown')
-
-    for tag in soup.select('br'):
-        tag.name = 'span'
-        tag.string = '\n'
-
-    for tag in soup.select('.text'):
-        tag.string = tag.text.rstrip()
-
-    final_text = header + '\n\n'
-    for tag in soup(class_=WANTED):
-        final_text += tag.text.strip() + '\n\n'
-
-    logging.debug('Finished BeautifulSoup processing')
-
-    # if not inline_details:
-    return final_text.strip()
-    # else:
-    #     start = html.find('data-osis="') + 11
-    #     end = html.find('"', start)
-    #     data_osis = html[start:end]
-    #     qr_id = data_osis + '/'
-    #     qr_title = title.strip()
-    #     content = final_text.split('\n', 1)[1].replace('*', '').replace('_', '')
-    #     content = ' '.join(content.split())
-    #     qr_description = (content[:150] + '...') if len(content) > 153 else content
-    #     return final_text.strip(), qr_id, qr_title, qr_description
-
-
-def arabic_to_roman(numeral):
-    roman = OrderedDict()
-    roman[5] = "V"
-    roman[4] = "IV"
-    roman[1] = "I"
-
-    def roman_num(num):
-        for r in roman.keys():
-            x, y = divmod(num, r)
-            yield roman[r] * x
-            num -= (r * x)
-            if num <= 0:
-                break
-
-    return "".join([a for a in roman_num(numeral)])
-
-
-TELEGRAM_URL = 'https://api.telegram.org/bot' + TOKEN
+TELEGRAM_URL = 'https://api.telegram.org/bot' + TG_TOKEN
 TELEGRAM_URL_SEND = TELEGRAM_URL + '/sendMessage'
 TELEGRAM_URL_CHAT_ACTION = TELEGRAM_URL + '/sendChatAction'
 JSON_HEADER = {'Content-Type': 'application/json;charset=utf-8'}
@@ -172,6 +68,103 @@ RECOGNIZED_ERRORS = ('PEER_ID_INVALID',
                      'Bad Request: not enough rights to send text messages to the chat',
                      'Bad Request: group chat was deactivated',
                      RECOGNIZED_ERROR_MIGRATE)
+# endregion
+
+
+def restricted(func):
+    @wraps(func)
+    def wrapped(update, context, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id not in WHITELIST_IDS:
+            print("Unauthorized access denied for {}.".format(user_id))
+            return
+        return func(update, context, *args, **kwargs)
+    return wrapped
+
+
+def strip_markdown(string):
+    return string.replace('*', r'\*').replace('_', r'\_').replace('`', r'\`').replace('[', r'\[')
+
+
+def get_passage(article, is_amendment=False):
+    # adjusted to account for two original amendments at the beginning
+    ordinals = ['second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth']
+    SOURCE_URL = 'https://en.wikisource.org/wiki/Constitution_of_the_United_States_of_America'
+    if is_amendment:
+        SOURCE_URL = 'https://en.wikisource.org/wiki/United_States_Bill_of_Rights'
+
+    try:
+        logging.debug('Began fetching from remote')
+        html = requests.get(SOURCE_URL).content.decode('utf8')
+        logging.debug('Finished fetching from remote')
+    except requests.HTTPError as e:
+        logging.warning('Error fetching passage:\n' + str(e))
+        return 'Error fetching passage.'
+
+    # not sure if consistent/good
+    start = html.find('<div class="prp-pages-output')
+    end = html.find('<table>', start)
+
+    if is_amendment:
+        start = html.find('Article the twelfth')
+
+        if int(article) < 10:
+            start = html.find('Article the {}'.format(ordinals[int(article)]))
+
+        end = html.find('</tr>', start)
+
+    passage_html = html[start:end - 1]
+    soup = BeautifulSoup(passage_html, 'lxml')
+
+    if is_amendment:
+        title = 'Amendment {}'.format(article)
+        selector = 'td'
+    else:
+        # format of html element ids: aIV[-s#][-c#]
+        article_id = 'a' + arabic_to_roman(int(article[0])) + '-s' + article[2]
+        title = 'Article {} Section {}'.format(article_id[1], article[2])
+
+        # need every dd.p in dl after article start
+        selector = '[id=' + article_id + '], [id^=' + article_id + ']'
+
+    header = '**' + strip_markdown(title.strip()) + '**'
+
+    # for tag in soup.select(selector):
+    #     print(tag.text)
+
+    WANTED = 'bg-bot-passage-text'
+    needed_stripping = False
+
+    for tag in soup.select(selector):
+        tag['class'] = WANTED
+        bad_strings = tag(text=re.compile(r'([*_`\[])'))
+        for bad_string in bad_strings:
+            stripped_text = strip_markdown(bad_string)
+            bad_string.replace_with(stripped_text)
+            needed_stripping = True
+
+    if needed_stripping:
+        logging.info('Stripped markdown')
+
+    for tag in soup.select('br'):
+        tag.name = 'span'
+        tag.string = '\n'
+
+    for tag in soup.select('.text'):
+        tag.string = tag.text.rstrip()
+
+    final_text = header + '\n\n'
+    for tag in soup(class_=WANTED):
+        final_text += tag.text.strip() + '\n\n'
+
+    logging.debug('Finished BeautifulSoup processing')
+
+    return final_text.strip()
+
+
+def arabic_to_roman(numeral):
+    roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII']
+    return roman[numeral-1]  # :trollface:
 
 
 def telegram_post(data, deadline=10):
@@ -407,13 +400,14 @@ def send_typing(uid):
         return
 
 
+@restricted
 async def main_cmd(update: Update, context: CallbackContext):
+    # region constants
     BOT_USERNAME = 'usconstitutionbot'
     BOT_HANDLE = '@' + BOT_USERNAME
-    BOT_DESCRIPTION = 'This bot can fetch US Constitution passages from wikisource.org.'
+    BOT_DESCRIPTION = 'This bot can fetch US Constitution passages from [WikiSource](wikisource.org).'
 
-    CMD_LIST = '/get <article>[:<section>]\n/getAmd <number>\n' + \
-               'Examples:\n/get 3:2\n/getAmd 1\n' + \
+    CMD_LIST = '/get <article>[:<section>]\n/getAmd <number>\nExamples:\n/get 3:2\n/getAmd 1\n' + \
                'Inline mode:\n' + BOT_HANDLE + ' 3:2\n' + BOT_HANDLE + ' amd1'
 
     WELCOME_GROUP = 'Hello, friends in {}! Thanks for adding me in!'
@@ -425,47 +419,34 @@ async def main_cmd(update: Update, context: CallbackContext):
            'Enjoy using Constitution Bot? Click the link below to rate it!\n' + \
            'https://telegram.me/storebot?start=' + BOT_USERNAME
 
-    UNRECOGNIZED = 'Sorry {}, I could not understand that. ' + \
+    UNRECOGNIZED = '{}, that command didn\'t make any fucking sense. ' + \
                    'Please enter one of the following commands:\n' + CMD_LIST
 
     REMOTE_ERROR = 'Sorry {}, I\'m having some difficulty accessing the site. ' + \
                    'Please try again later.'
 
     GET_PASSAGE = 'Which constitution passage do you want to look up?'
-
-    # GET_SEARCH_TERM = 'Please enter what you wish to search for.\n\n' + \
-    #                   'Tip: For faster results, use:\n/search make disciples\n' + \
-    #                   '/search "love is patient" _(quotes to match exact phrase)_'
-
     NO_RESULTS_FOUND = 'Sorry {}, no results were found. Please try again.'
-    # VERSION_NOT_FOUND = 'Sorry {}, I could not find that version. ' + \
-    #                     'Use /setdefault to view all available versions.'
-
-    # SET_DEFAULT_CHOOSE_LANGUAGE = 'Choose a language:'
-    # SET_DEFAULT_CHOOSE_VERSION = 'Select a version:'
-    # SET_DEFAULT_SUCCESS = 'Success! Default version is now *{}*.'
-    # SET_DEFAULT_FAILURE = VERSION_NOT_FOUND + '\n\nCurrent default is *{}*.'
-
-    # SETTINGS = 'Current default version is *{}*. Use /setdefault to change it.'
-
     # BACK_TO_LANGUAGES = u'\U0001F519' + ' to language list'
-
     TRY_KEYBOARD = build_inline_switch_keyboard('Try inline mode', '3:2')
+    # endregion
 
-    logging.debug(update.inline_query)
+    inline_query = ''
+    if update['message'] is not None and update.message['text'] is not None:
+        inline_query = update.message.text
 
-    inline_query = update.inline_query.query
     chosen_inline_result = update.chosen_inline_result
 
     if inline_query:
-        words = inline_query.split()
-        if len(words) > 1 and words[0].upper() == 'AMD':
-            passage = words[1]
-            response = get_passage(passage, True, True)
+        words = inline_query.strip().split()
+
+        if len(words) > 1 and words[0].upper() == '/GETAMD':
+            response = get_passage(words[1], True)
         else:
-            response = get_passage(inline_query, inline_details=True)
+            response = get_passage(words[1])
 
         results = []
+
         if not response:
             logging.error(HTTPStatus.BAD_GATEWAY)  # 502
         elif response == EMPTY:
@@ -485,7 +466,12 @@ async def main_cmd(update: Update, context: CallbackContext):
                    'switch_pm_parameter': 'setdefault', 'cache_time': 0}
 
         output = json.dumps(payload)
-        await context.bot.answer_inline_query(update.inline_query.id, results)
+
+        if len(response) > 4096:
+            response = response[:4093] + '...'
+
+        await context.bot.send_message(update.message.chat_id, response,
+                                       reply_to_message_id=update.message.id)
         logging.info('Answered inline query')
         logging.debug(output)
         return
@@ -495,23 +481,24 @@ async def main_cmd(update: Update, context: CallbackContext):
         return
 
     msg = update.message
+
     if not msg:
         logging.info(LOG_TYPE_NON_MESSAGE)
         return
 
     msg_chat = msg.chat
     msg_from = msg.from_user
+    text = msg.text
 
     uid = str(msg_chat.id)
     first_name = msg_from.first_name
     last_name = msg_from.last_name
     username = msg_from.username
-
     name = first_name.encode('utf-8', 'ignore').strip()
-    text = msg.text
+
     if text:
         text = text.encode('utf-8', 'ignore')
-        logging.info(text)
+        # logging.info(text)
 
     if msg_chat.type == 'private':
         group_name = name
@@ -523,10 +510,13 @@ async def main_cmd(update: Update, context: CallbackContext):
 
     def get_from_string():
         name_string = name
+
         if last_name:
             name_string += ' ' + last_name.encode(errors='ignore').strip()
+
         if username:
             name_string += ' @' + username.encode(errors='ignore').strip()
+
         return name_string
 
     if user.last_sent is None or text == '/start':
@@ -547,6 +537,7 @@ async def main_cmd(update: Update, context: CallbackContext):
             response = WELCOME_GROUP.format(group_name)
         else:
             response = WELCOME_USER.format(name)
+
         response += WELCOME_GET_STARTED
         send_message(user, response, 'welcome', custom_keyboard=TRY_KEYBOARD)
         user.await_reply(None)
@@ -563,11 +554,13 @@ async def main_cmd(update: Update, context: CallbackContext):
     if text is None:
         logging.info(LOG_TYPE_NON_TEXT)
         migrate_to_chat_id = msg.migrate_to_chat_id
+
         if migrate_to_chat_id:
             new_uid = migrate_to_chat_id
             user = user.migrate_to(new_uid)
             logging.info(LOG_USER_MIGRATED.format(uid, new_uid, user.get_description()))
         return
+
     text = text.strip()
 
     def is_get_command():
@@ -575,12 +568,6 @@ async def main_cmd(update: Update, context: CallbackContext):
 
     # def is_get_amd_command():
     #     return text.lower().startswith('/getAmd')
-
-    # def is_full_search_command():
-    #     return text.lower().startswith('/search ')
-
-    # def is_link_command():
-    #     return text[1:].startswith(BOOKS)
 
     def is_command(word):
         cmd = text.lower().strip()
@@ -593,11 +580,6 @@ async def main_cmd(update: Update, context: CallbackContext):
     if is_command('get'):
         user.await_reply('get')
         send_message(user, GET_PASSAGE, force_reply=True)
-
-    # elif is_command('search'):
-    #     user.await_reply('search')
-    #     send_message(user, self.GET_SEARCH_TERM, force_reply=True, markdown=True)
-
     elif is_get_command():
         user.await_reply(None)
         words = text.split()
@@ -625,7 +607,6 @@ async def main_cmd(update: Update, context: CallbackContext):
             return
 
         send_message(user, response, 'passage')
-
     elif is_command('help'):
         user.await_reply(None)
         send_message(user, HELP.format(name), custom_keyboard=TRY_KEYBOARD)
@@ -633,65 +614,6 @@ async def main_cmd(update: Update, context: CallbackContext):
     # elif is_command('settings'):
     #     user.await_reply(None)
     #     send_message(user, self.SETTINGS.format(user.version), is_markdown=True)
-
-    # elif is_link_command():
-    #     user.await_reply(None)
-    #     passage = text[1:].replace('V', ':')
-    #     if passage.endswith(self.BOT_HANDLE):
-    #         passage = passage[:-len(self.BOT_HANDLE)]
-
-    #     send_typing(uid)
-    #     response = get_passage(passage, user.version)
-
-    #     if response == EMPTY:
-    #         send_message(user, self.NO_RESULTS_FOUND.format(name))
-    #         logging.info(LOG_ERROR_INVALID_LINK + text)
-    #         return
-    #     elif response == None:
-    #         send_message(user, self.REMOTE_ERROR.format(name))
-    #         return
-
-    #     send_message(user, response, msg_type='passage')
-
-    # elif text in ('/more', '/more' + self.BOT_HANDLE) and user.reply_to != None and \
-    #      user.reply_to.startswith('search') and len(user.reply_to) > 6:
-    #     idx = user.reply_to.find(' ')
-    #     old_start = int(user.reply_to[6:idx])
-    #     search_term = user.reply_to[idx + 1:]
-
-    #     new_start = old_start + MAX_SEARCH_RESULTS
-
-    #     user.await_reply('search{} '.format(new_start) + search_term)
-
-    #     send_typing(uid)
-    #     response = get_search_results(search_term, new_start)
-
-    #     if response == EMPTY:
-    #         user.await_reply(None)
-    #         send_message(user, self.NO_RESULTS_FOUND.format(name))
-    #         return
-    #     elif response == None:
-    #         send_message(user, self.REMOTE_ERROR.format(name))
-    #         return
-
-    #     send_message(user, response, msg_type='result')
-
-    # elif user.reply_to != None and user.reply_to == 'search':
-    #     search_term = text
-    #     user.await_reply('search0 ' + raw_text)
-
-    #     send_typing(uid)
-    #     response = get_search_results(search_term)
-
-    #     if response == EMPTY:
-    #         user.await_reply(None)
-    #         send_message(user, self.NO_RESULTS_FOUND.format(name), hide_keyboard=True)
-    #         return
-    #     elif response == None:
-    #         send_message(user, self.REMOTE_ERROR.format(name), hide_keyboard=True)
-    #         return
-
-    #     send_message(user, response, msg_type='result', hide_keyboard=True)
 
     elif user.reply_to is not None and user.reply_to.startswith('get'):
         is_amendment = user.reply_to[3:].upper() == 'AMD'
@@ -708,7 +630,6 @@ async def main_cmd(update: Update, context: CallbackContext):
             return
 
         send_message(user, response, 'passage', hide_keyboard=True)
-
     else:
         user.await_reply(None)
         msg_reply = msg.reply_to_message
@@ -717,27 +638,11 @@ async def main_cmd(update: Update, context: CallbackContext):
             logging.info(LOG_UNRECOGNIZED)
             return
 
-        # to_lookup = text.lower().replace(BOT_HANDLE, '')
-        # refs = extract_refs(to_lookup)
-        # if refs:
-        #     ref = refs[0]
-        #     book = ref[0]
-        #     passage = '{}:{}-{}:{}'.format(book, ref[1], ref[2], ref[3], ref[4])
-
-        #     send_typing(uid)
-        #     response = get_passage(passage)
-
-        #     if response == EMPTY:
-        #         logging.error(LOG_ERROR_INVALID_QUICK + text)
-
-        #     if response and response != EMPTY:
-        #         send_message(user, response, msg_type='passage', hide_keyboard=True)
-        #         return
-
         logging.info(LOG_UNRECOGNIZED)
         send_message(user, UNRECOGNIZED.format(name), custom_keyboard=TRY_KEYBOARD)
 
 
+@restricted
 async def message_cmd(update: Update, context: CallbackContext):
     msg_type = 'message'
     data = update.message
@@ -759,6 +664,7 @@ async def message_cmd(update: Update, context: CallbackContext):
         logging.error(HTTPStatus.BAD_GATEWAY)  # 502
 
 
+@restricted
 class MigratePage(BaseHTTPRequestHandler):
     def get(self):
         self.send_header('Content-Type', 'text/plain')
@@ -766,6 +672,7 @@ class MigratePage(BaseHTTPRequestHandler):
         self.wfile.write(bytes('Migrate page\n', 'utf-8'))
 
 
+@restricted
 class PromoPage(BaseHTTPRequestHandler):
     # @staticmethod
     # def get():
@@ -792,6 +699,7 @@ class PromoPage(BaseHTTPRequestHandler):
         send_message(user, promo_msg, 'promo')
 
 
+@restricted
 class VerifyPage(BaseHTTPRequestHandler):
     def get(self):
         try:
@@ -838,6 +746,7 @@ class VerifyPage(BaseHTTPRequestHandler):
 
 app_handler = [
      CommandHandler('get', main_cmd),
+     CommandHandler('getAmd', main_cmd),
      CommandHandler('message', message_cmd),
      # CommandHandler('/promo', PromoPage),
      # CommandHandler ('/migrate', MigratePage),

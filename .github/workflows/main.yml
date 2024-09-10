@@ -4,9 +4,10 @@ on:
     branches:
       - 'master'
 env:
-  TG_TOKEN: ${{ secrets.TOKEN }}
+  TG_TOKEN: ${{ secrets.TG_TOKEN }}
   ADMIN_ID: ${{ secrets.ADMIN_ID }}
   BOT_ID: ${{ secrets.BOT_ID }}
+  WHITELIST_IDS: ${{ secrets.WHITELIST_IDS }}
 jobs:
   run:
     runs-on: ubuntu-latest

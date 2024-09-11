@@ -21,4 +21,4 @@ jobs:
       with:
         python-version: 3.11.4
         cache: pip
-    - run: pip install -r requirements.txt && python app.py --no-whitelist --no-login
+    - run: pip install -r requirements.txt && python app.py --uid ${{ secrets.WHITELIST_IDS }} --no-login

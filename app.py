@@ -2,7 +2,6 @@ import logging
 import os
 
 from argparse import ArgumentParser
-logging.info(os.environ['WHITELIST_IDS'])
 from constitutionbot import app_handler
 from telegram import Update
 from telegram.ext import (

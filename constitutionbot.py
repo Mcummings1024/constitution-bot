@@ -18,7 +18,6 @@ from telegram.ext import CallbackContext, CommandHandler
 TG_TOKEN = os.environ['TG_TOKEN']
 ADMIN_ID = os.environ['ADMIN_ID']
 BOT_ID = os.environ['BOT_ID']
-logging.info(os.environ['WHITELIST_IDS'])
 WHITELIST_IDS = [int(id_string) for id_string in os.environ['WHITELIST_IDS'].split(',')]
 
 # region text constants
@@ -115,7 +114,7 @@ def get_passage(article, is_amendment=False):
         end = html.find('</tr>', start)
 
     passage_html = html[start:end - 1]
-    soup = BeautifulSoup(passage_html, 'lxml')
+    soup = BeautifulSoup(passage_html, 'html.parser')
 
     if is_amendment:
         title = 'Amendment {}'.format(article)

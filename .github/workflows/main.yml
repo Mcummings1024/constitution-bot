@@ -2,7 +2,7 @@ name: US Constitution Bot
 on:
   push:
     branches:
-      - 'master'
+      - 'prod'
 env:
   TG_TOKEN: ${{ secrets.TG_TOKEN }}
   ADMIN_ID: ${{ secrets.ADMIN_ID }}

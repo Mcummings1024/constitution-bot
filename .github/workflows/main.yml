@@ -9,7 +9,8 @@ env:
   BOT_ID: ${{ secrets.BOT_ID }}
   WHITELIST_IDS: ${{ secrets.WHITELIST_IDS }}
 jobs:
-  run:
+  deploy:
+    environment: dev
     runs-on: ubuntu-latest
     steps:
     - name: Checkout latest
@@ -21,4 +22,4 @@ jobs:
       with:
         python-version: 3.11.4
         cache: pip
-    - run: pip install -r requirements.txt && python app.py --uid ${{ secrets.WHITELIST_IDS }} --no-login
+    - run: pip install -r requirements.txt && python app.py --no-whitelist --no-login

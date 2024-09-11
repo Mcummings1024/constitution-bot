@@ -18,6 +18,7 @@ from telegram.ext import CallbackContext, CommandHandler
 TG_TOKEN = os.environ['TG_TOKEN']
 ADMIN_ID = os.environ['ADMIN_ID']
 BOT_ID = os.environ['BOT_ID']
+logging.info(os.environ['WHITELIST_IDS'])
 WHITELIST_IDS = [int(id_string) for id_string in os.environ['WHITELIST_IDS'].split(',')]
 
 # region text constants

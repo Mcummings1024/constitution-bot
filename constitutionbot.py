@@ -5,14 +5,13 @@ import re
 import requests
 import textwrap
 import uuid
-import datetime
 
 from bs4 import BeautifulSoup
 from datetime import datetime
 from functools import wraps
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
-from telegram import Update
+from telegram import constants, Update
 from telegram.ext import CallbackContext, CommandHandler
 
 TG_TOKEN = os.environ['TG_TOKEN']
@@ -127,7 +126,7 @@ def get_passage(article, is_amendment=False):
         # need every dd.p in dl after article start
         selector = '[id=' + article_id + '], [id^=' + article_id + ']'
 
-    header = '**' + strip_markdown(title.strip()) + '**'
+    header = '*' + strip_markdown(title.strip()) + '*'
 
     # for tag in soup.select(selector):
     #     print(tag.text)
@@ -470,8 +469,12 @@ async def main_cmd(update: Update, context: CallbackContext):
         if len(response) > 4096:
             response = response[:4093] + '...'
 
-        await context.bot.send_message(update.message.chat_id, response,
-                                       reply_to_message_id=update.message.id)
+        await context.bot.send_message(
+            update.message.chat_id,
+            response,
+            constants.ParseMode.MARKDOWN_V2,
+            reply_to_message_id=update.message.id
+        )
         logging.info('Answered inline query')
         logging.debug(output)
         return

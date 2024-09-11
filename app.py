@@ -36,26 +36,12 @@ def main() -> None:
     login.add_argument(
         '--user', action='store', dest='ig_user', metavar='Instagram User',
         type=str, help='Username through which Instaloader is ran')
-    parser.add_argument(
-        '--no-rich', action='store_false', dest='rich', help='Disables rich output')
-    parser.add_argument(
-        '--log-file', action='store_true', dest='logfile', help='Log to file')
+    parser.add_argument('--log-file', action='store_true', dest='logfile', help='Log to file')
     parser.add_argument('-d', '--debug', action='store_true', help='Enable Debug mode')
 
     args = parser.parse_args()
 
-    logging_handlers: List[logging.Handler] = []
-    do_rich = False
-    if args.rich:
-        try:
-            from rich.logging import RichHandler
-        except ImportError:
-            logging_handlers.append(logging.StreamHandler())
-        else:
-            logging_handlers.append(RichHandler(rich_tracebacks=True))
-            do_rich = True
-    else:
-        logging_handlers.append(logging.StreamHandler())
+    logging_handlers: List[logging.Handler] = [logging.StreamHandler()]
 
     if args.logfile:
         logging_handlers.append(logging.FileHandler('IgTgBot.log'))
@@ -67,7 +53,6 @@ def main() -> None:
     )
 
     logging.info(args)
-    logging.info('do_rich: %s', do_rich)
 
     if args.whitelist is None:
         user_whitelist: Optional[Set[int]] = None

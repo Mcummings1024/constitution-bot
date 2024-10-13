@@ -24,10 +24,10 @@ def main() -> None:
 
     whitelist_group = parser.add_mutually_exclusive_group(required=True)
     whitelist_group.add_argument(
-        '--uid', action='append', dest='whitelist', metavar='Telegram User ID',
+        '--uid', action='append', dest='tg_ids', metavar='Telegram User ID',
         type=int, help='Telegram User IDs authorized to use this bot')
     whitelist_group.add_argument(
-        '--no-whitelist', action='store_const', const=None, dest='whitelist',
+        '--no-whitelist', action='store_const', const=None, dest='tg_ids',
         help='Allow all Telegram Users to use this bot (Could cause rate limiting by Meta)')
     login = parser.add_mutually_exclusive_group(required=True)
     login.add_argument(
@@ -54,15 +54,12 @@ def main() -> None:
 
     logging.info(args)
 
-    if args.whitelist is None:
-        user_whitelist: Optional[Set[int]] = None
-        logging.info('No authorized users specified')
-    else:
+    if 'TG_TOKEN' not in os.environ and args.whitelist is not None:
         user_whitelist = set(args.whitelist)
         logging.info('Authorized users: %s', user_whitelist)
 
     token = os.environ['TG_TOKEN']
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).write_timeout(30).build()
 
     application.add_handlers(app_handler)
     application.add_handler(CommandHandler('start', start))
@@ -80,8 +77,8 @@ async def start(update: Update, context: CallbackContext) -> None:
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await context.bot.send_message(chat_id=update.effective_chat.id,
-                                   text='Learn English idiot, that command made no sense!')
+    await context.bot.send_message(update.effective_chat.id,
+                                   'Learn English idiot, that command made no sense!')
 
 
 if __name__ == '__main__':

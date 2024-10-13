@@ -13,11 +13,13 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from telegram import constants, Update
 from telegram.ext import CallbackContext, CommandHandler
+from telegram.error import TelegramError
 
 TG_TOKEN = os.environ['TG_TOKEN']
 ADMIN_ID = os.environ['ADMIN_ID']
 BOT_ID = os.environ['BOT_ID']
 WHITELIST_IDS = [int(id_string) for id_string in os.environ['WHITELIST_IDS'].split(',')]
+
 
 # region text constants
 EMPTY = 'empty'
@@ -75,19 +77,25 @@ def restricted(func):
     def wrapped(update, context, *args, **kwargs):
         user_id = update.effective_user.id
         if user_id not in WHITELIST_IDS:
-            print("Unauthorized access denied for {}.".format(user_id))
+            print(f'Unauthorized access denied for {user_id}.')
             return
         return func(update, context, *args, **kwargs)
     return wrapped
 
 
+# 18 bad chars per tg API: *_`[]()~>#+-=|{}.!
 def strip_markdown(string):
-    return string.replace('*', r'\*').replace('_', r'\_').replace('`', r'\`').replace('[', r'\[')
+    return (string
+            .replace('*', r'\*').replace('_', r'\_').replace('`', r'\`').replace('[', r'\[')
+            .replace(']', r'\]').replace('(', r'\(').replace(')', r'\)').replace('~', r'\~')
+            .replace('>', r'\>').replace('#', r'\#').replace('+', r'\+').replace('-', r'\-')
+            .replace('=', r'\=').replace('|', r'\|').replace('{', r'\{').replace('}', r'\}')
+            .replace('.', r'\.').replace('!', r'\!'))
 
 
-def get_passage(article, is_amendment=False):
+def get_passage(passage_input, is_amendment=False):
     # adjusted to account for two original amendments at the beginning
-    ordinals = ['second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth']
+    ordinals = ['second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'eleventh']
     SOURCE_URL = 'https://en.wikisource.org/wiki/Constitution_of_the_United_States_of_America'
     if is_amendment:
         SOURCE_URL = 'https://en.wikisource.org/wiki/United_States_Bill_of_Rights'
@@ -107,24 +115,39 @@ def get_passage(article, is_amendment=False):
     if is_amendment:
         start = html.find('Article the twelfth')
 
-        if int(article) < 10:
-            start = html.find('Article the {}'.format(ordinals[int(article)]))
+        if int(passage_input) < 10:
+            start = html.find(f'Article the {ordinals[int(passage_input)]}')
 
         end = html.find('</tr>', start)
 
-    passage_html = html[start:end - 1]
+    passage_html = html[start:end]
     soup = BeautifulSoup(passage_html, 'html.parser')
+    title = f'Amendment {passage_input}'
+    selector = 'td'
 
-    if is_amendment:
-        title = 'Amendment {}'.format(article)
-        selector = 'td'
-    else:
-        # format of html element ids: aIV[-s#][-c#]
-        article_id = 'a' + arabic_to_roman(int(article[0])) + '-s' + article[2]
-        title = 'Article {} Section {}'.format(article_id[1], article[2])
+    if not is_amendment:
+        try:
+            # format of html element ids: aIV[-s#][-c#]
+            article_roman = arabic_to_roman(int(passage_input.split(':')[0]))
+            section = paragraph = ''
+            if ':' in passage_input:
+                section = passage_input.split(':')[1]
+                if '-' in passage_input:
+                    section, paragraph = section.split('-')
 
-        # need every dd.p in dl after article start
-        selector = '[id=' + article_id + '], [id^=' + article_id + ']'
+            article_id = ('a' + article_roman +
+                          ('-s' + section if section != '' else '') +
+                          ('-c' + paragraph if paragraph != '' else ''))
+            title = ('Article ' + article_roman +
+                     (' Section ' + section if section != '' else '') +
+                     (' Paragraph ' + paragraph if paragraph != '' else ''))
+
+            # need every dd.p in dl after article start
+            selector = f'[id={article_id}], [id^={article_id}-]'
+        except IndexError as err:
+            logging.error(f'Error when parsing command: {passage_input}', err)
+        except Exception as err:
+            logging.error(f'Unknown error, input was {passage_input}', err)
 
     header = '*' + strip_markdown(title.strip()) + '*'
 
@@ -136,7 +159,7 @@ def get_passage(article, is_amendment=False):
 
     for tag in soup.select(selector):
         tag['class'] = WANTED
-        bad_strings = tag(text=re.compile(r'([*_`\[])'))
+        bad_strings = tag(text=re.compile(r'([*_`\[\]()~>#+\-=|{}.!])'))
         for bad_string in bad_strings:
             stripped_text = strip_markdown(bad_string)
             bad_string.replace_with(stripped_text)
@@ -156,14 +179,16 @@ def get_passage(article, is_amendment=False):
     for tag in soup(class_=WANTED):
         final_text += tag.text.strip() + '\n\n'
 
-    logging.debug('Finished BeautifulSoup processing')
+    # for ind in [i for i, letter in enumerate(final_text) if letter == '.']:
+    #     logging.info(f'Period at index {ind}: {final_text[ind-2:ind+2]}')
+    logging.debug('Finished html processing')
 
     return final_text.strip()
 
 
 def arabic_to_roman(numeral):
-    roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII']
-    return roman[numeral-1]  # :trollface:
+    roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X']
+    return roman[numeral-1] if numeral < 10 else 'invalid input'  # :trollface:
 
 
 def telegram_post(data, deadline=10):
@@ -175,6 +200,7 @@ def telegram_query(uid, deadline=10):
     return requests.post(TELEGRAM_URL_CHAT_ACTION, data, headers=JSON_HEADER, timeout=deadline)
 
 
+# region User
 class User:  # (db.Model):
     def __init__(self, uname, f_name='', l_name=''):
         self.uid = uuid.uuid4()
@@ -264,8 +290,10 @@ def update_profile(uid, uname, f_name, l_name):
         user = User(uname, f_name, l_name)
         # user.put()
         return user
+# endregion
 
 
+# region build UI
 def build_buttons(menu):
     buttons = []
     for item in menu:
@@ -280,6 +308,7 @@ def build_keyboard(buttons):
 def build_inline_switch_keyboard(text, query=''):
     inline_switch_button = {'text': text, 'switch_inline_query': query}
     return {'inline_keyboard': [[inline_switch_button]]}
+# endregion
 
 
 def send_message(user_or_uid, text, msg_type='message', force_reply=False, is_markdown=False,
@@ -395,7 +424,8 @@ def send_typing(uid):
     try:
         # rpc = requests.create_rpc()
         requests.post(TELEGRAM_URL_CHAT_ACTION, data, headers=JSON_HEADER)
-    except requests.HTTPError:
+    except requests.HTTPError as err:
+        logging.error(f'Error on POST send typing, {err=}')
         return
 
 
@@ -404,86 +434,82 @@ async def main_cmd(update: Update, context: CallbackContext):
     # region constants
     BOT_USERNAME = 'usconstitutionbot'
     BOT_HANDLE = '@' + BOT_USERNAME
-    BOT_DESCRIPTION = 'This bot can fetch US Constitution passages from [WikiSource](wikisource.org).'
+    BOT_DESCRIPTION = 'This bot can get US Constitution passages from [WikiSource](wikisource.org).'
 
-    CMD_LIST = '/get <article>[:<section>]\n/getAmd <number>\nExamples:\n/get 3:2\n/getAmd 1\n' + \
-               'Inline mode:\n' + BOT_HANDLE + ' 3:2\n' + BOT_HANDLE + ' amd1'
+    CMD_LIST = '/get <article>[:<section>][-<paragraph>]\n/getAmd <number>\nExamples:\n/get 3:2-1\n/getAmd 1'
+    # \nInline mode:\n' + BOT_HANDLE + ' 3:2\n' + BOT_HANDLE + ' amd1'
 
     WELCOME_GROUP = 'Hello, friends in {}! Thanks for adding me in!'
     WELCOME_USER = 'Hello, {}! Welcome!'
     WELCOME_GET_STARTED = ' ' + BOT_DESCRIPTION + \
                           '\n\nTo get started, enter one of the following commands:\n' + CMD_LIST
 
-    HELP = 'Hi {}! Please enter one of the following commands:\n' + CMD_LIST + '\n\n' + \
-           'Enjoy using Constitution Bot? Click the link below to rate it!\n' + \
-           'https://telegram.me/storebot?start=' + BOT_USERNAME
+    HELP = 'Hi {}! Please enter one of the following commands:\n' + CMD_LIST
 
     UNRECOGNIZED = '{}, that command didn\'t make any fucking sense. ' + \
                    'Please enter one of the following commands:\n' + CMD_LIST
 
-    REMOTE_ERROR = 'Sorry {}, I\'m having some difficulty accessing the site. ' + \
-                   'Please try again later.'
-
+    REMOTE_ERROR = 'Sorry {}, I\'m having trouble accessing the site. Please try again later.'
     GET_PASSAGE = 'Which constitution passage do you want to look up?'
     NO_RESULTS_FOUND = 'Sorry {}, no results were found. Please try again.'
     # BACK_TO_LANGUAGES = u'\U0001F519' + ' to language list'
     TRY_KEYBOARD = build_inline_switch_keyboard('Try inline mode', '3:2')
     # endregion
 
+    msg = update.message
     inline_query = ''
-    if update['message'] is not None and update.message['text'] is not None:
-        inline_query = update.message.text
+    if update['message'] is not None and msg['text'] is not None:
+        inline_query = msg.text
 
     chosen_inline_result = update.chosen_inline_result
 
     if inline_query:
         words = inline_query.strip().split()
 
-        if len(words) > 1 and words[0].upper() == '/GETAMD':
-            response = get_passage(words[1], True)
+        if len(words) > 1:
+            if words[0].upper() == '/GETAMD':
+                response = get_passage(words[1], True)
+            elif words[0] == '/get':
+                response = get_passage(words[1])
+            else:
+                response = UNRECOGNIZED
+        elif words[0] == '/help':
+            response = strip_markdown(HELP.format(msg.from_user.first_name))
         else:
-            response = get_passage(words[1])
+            response = UNRECOGNIZED
 
-        results = []
+        # results = []
 
         if not response:
             logging.error(HTTPStatus.BAD_GATEWAY)  # 502
-        elif response == EMPTY:
-            results = []
-        else:
-            passage = response[0]
-            qr_id = response[1]
-            qr_title = response[2]
-            qr_description = response[3]
-            content = {'message_text': passage, 'parse_mode': 'Markdown',
-                       'disable_web_page_preview': True}
-            results = [{'type': 'article', 'id': qr_id, 'title': qr_title,
-                        'description': qr_description, 'input_message_content': content,
-                        'thumb_url': ''}]
+        # elif response == EMPTY:
+            # results = []
+        # else:
+            # passage = response[0]
+            # qr_id = response[1]
+            # qr_title = response[2]
+            # qr_description = response[3]
+            # content = {'message_text': passage, 'parse_mode': 'Markdown', 'disable_web_page_preview': True}
+            # results = [{'type': 'article', 'id': qr_id, 'title': qr_title, 'description': qr_description, 'input_message_content': content, 'thumb_url': ''}]
 
-        payload = {'method': 'answerInlineQuery', 'results': results,
-                   'switch_pm_parameter': 'setdefault', 'cache_time': 0}
-
-        output = json.dumps(payload)
+        # payload = {'method': 'answerInlineQuery', 'results': results, 'switch_pm_parameter': 'setdefault', 'cache_time': 0}
+        # output = json.dumps(payload)
 
         if len(response) > 4096:
-            response = response[:4093] + '...'
+            response = response[:4093] + r'\.\.\.'
 
-        await context.bot.send_message(
-            update.message.chat_id,
-            response,
-            constants.ParseMode.MARKDOWN_V2,
-            reply_to_message_id=update.message.id
-        )
-        logging.info('Answered inline query')
-        logging.debug(output)
+        try:
+            await context.bot.send_message(
+                msg.chat_id, response, constants.ParseMode.MARKDOWN_V2, reply_to_message_id=msg.id)
+            logging.info('Answered inline query')
+        except TelegramError as err:
+            logging.error(f'Error when sending message: {err=}')
+
         return
     elif chosen_inline_result:
         logging.info('Inline query result used')
         logging.debug(str(chosen_inline_result))
         return
-
-    msg = update.message
 
     if not msg:
         logging.info(LOG_TYPE_NON_MESSAGE)
@@ -515,10 +541,10 @@ async def main_cmd(update: Update, context: CallbackContext):
         name_string = name
 
         if last_name:
-            name_string += ' ' + last_name.encode(errors='ignore').strip()
+            name_string += f' {last_name.encode(errors='ignore').strip()}'
 
         if username:
-            name_string += ' @' + username.encode(errors='ignore').strip()
+            name_string += f' @{username.encode(errors='ignore').strip()}'
 
         return name_string
 
@@ -547,9 +573,9 @@ async def main_cmd(update: Update, context: CallbackContext):
 
         if new_user:
             if user.is_group():
-                new_alert = 'New group: "{}" via user: {}'.format(group_name, get_from_string())
+                new_alert = f'New group: "{group_name}" via user: {get_from_string()}'
             else:
-                new_alert = 'New user: ' + get_from_string()
+                new_alert = f'New user: {get_from_string()}'
             # send_message(ADMIN_ID, new_alert)
 
         return
@@ -659,6 +685,9 @@ async def message_cmd(update: Update, context: CallbackContext):
         logging.warning(LOG_ERROR_SENDING.format(msg_type, uid, user.get_description(), str(e)))
         logging.debug(data)
         logging.error(HTTPStatus.BAD_GATEWAY)  # 502
+    except (TelegramError, TypeError) as err:
+        logging.error(f'Error when responding to message: {err=}')
+        return
 
     response = json.loads(result.content)
 
@@ -750,7 +779,7 @@ class VerifyPage(BaseHTTPRequestHandler):
 app_handler = [
      CommandHandler('get', main_cmd),
      CommandHandler('getAmd', main_cmd),
-     CommandHandler('message', message_cmd),
+     CommandHandler('help', main_cmd),
      # CommandHandler('/promo', PromoPage),
      # CommandHandler ('/migrate', MigratePage),
      # CommandHandler('/verify', VerifyPage),
